@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm add *)",
+      "Read(//d/my/Softwares/**)",
+      "Bash(ls -la node_modules/xlsx)",
+      "Bash(npx tsc *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'Initial commit: YunXuanClaw project *)"
+    ]
+  }
+}

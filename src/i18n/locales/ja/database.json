@@ -1,0 +1,38 @@
+{
+    "title": "データベース",
+    "subtitle": "データベースファイルの管理と表示",
+    "actions": {
+        "refresh": "更新",
+        "delete": "削除",
+        "openFolder": "フォルダで開く"
+    },
+    "upload": {
+        "title": "ファイルをアップロード",
+        "description": "データベースファイルまたはExcelファイルをアップロード、Excelファイルは自動的にデータベース形式に変換されます",
+        "dropHere": "ファイルをドラッグ＆ドロップするか、クリックしてアップロード",
+        "supportedTypes": ".db, .sqlite, .sqlite3, .xlsx, .xls 形式をサポート",
+        "uploading": "アップロード中...",
+        "converting": "Excelファイルを変換中..."
+    },
+    "list": {
+        "title": "データベース一覧",
+        "empty": "データベースファイルがありません、アップロードしてください"
+    },
+    "detail": {
+        "title": "データベース詳細",
+        "tables": "テーブル",
+        "rows": "行"
+    },
+    "toast": {
+        "loadFailed": "データベース一覧の読み込みに失敗しました",
+        "detailFailed": "データベース詳細の読み込みに失敗しました",
+        "deleteSuccess": "データベースを削除しました",
+        "deleteFailed": "データベースの削除に失敗しました",
+        "openFolderFailed": "フォルダを開けませんでした",
+        "invalidFileType": "サポートされていないファイル形式です",
+        "uploadSuccess": "データベースをアップロードしました",
+        "uploadFailed": "データベースのアップロードに失敗しました",
+        "convertSuccess": "Excelファイルをデータベースに変換しました: {{name}}",
+        "convertFailed": "Excelファイルの変換に失敗しました"
+    }
+}

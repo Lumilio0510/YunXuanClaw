@@ -1,0 +1,46 @@
+{
+    "title": "Database",
+    "subtitle": "Manage and view database files",
+    "actions": {
+        "refresh": "Refresh",
+        "delete": "Delete",
+        "openFolder": "Open in Folder",
+        "loadMore": "Load More"
+    },
+    "upload": {
+        "title": "Upload File",
+        "description": "Upload database files or Excel files, Excel files will be automatically converted to database format",
+        "dropHere": "Drag and drop files here or click to upload",
+        "supportedTypes": "Supports .db, .sqlite, .sqlite3, .xlsx, .xls formats",
+        "uploading": "Uploading...",
+        "converting": "Converting Excel file..."
+    },
+    "list": {
+        "title": "Database List",
+        "empty": "No database files yet, please upload one"
+    },
+    "detail": {
+        "title": "Database Details",
+        "tables": "Tables",
+        "rows": "rows",
+        "columns": "columns",
+        "noData": "No data",
+        "allDataLoaded": "All data loaded",
+        "remaining": "remaining",
+        "selectDatabase": "Select a database",
+        "selectDatabaseHint": "Select a database from the left list to view details"
+    },
+    "toast": {
+        "loadFailed": "Failed to load database list",
+        "detailFailed": "Failed to load database details",
+        "queryFailed": "Failed to query table data",
+        "deleteSuccess": "Database deleted",
+        "deleteFailed": "Failed to delete database",
+        "openFolderFailed": "Failed to open folder",
+        "invalidFileType": "Unsupported file type",
+        "uploadSuccess": "Database uploaded successfully",
+        "uploadFailed": "Failed to upload database",
+        "convertSuccess": "Excel file converted to database: {{name}}",
+        "convertFailed": "Failed to convert Excel file"
+    }
+}

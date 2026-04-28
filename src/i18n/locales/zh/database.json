@@ -1,0 +1,46 @@
+{
+    "title": "数据库",
+    "subtitle": "管理和查看数据库文件",
+    "actions": {
+        "refresh": "刷新",
+        "delete": "删除",
+        "openFolder": "打开所在文件夹",
+        "loadMore": "加载更多"
+    },
+    "upload": {
+        "title": "上传文件",
+        "description": "上传数据库文件或 Excel 文件，Excel 文件将自动转换为数据库格式",
+        "dropHere": "拖拽文件到此处或点击上传",
+        "supportedTypes": "支持 .db, .sqlite, .sqlite3, .xlsx, .xls 格式",
+        "uploading": "正在上传...",
+        "converting": "正在转换 Excel 文件..."
+    },
+    "list": {
+        "title": "数据库列表",
+        "empty": "暂无数据库文件，请上传一个"
+    },
+    "detail": {
+        "title": "数据库详情",
+        "tables": "数据表",
+        "rows": "行",
+        "columns": "列",
+        "noData": "暂无数据",
+        "allDataLoaded": "已加载全部数据",
+        "remaining": "条数据待加载",
+        "selectDatabase": "请选择一个数据库",
+        "selectDatabaseHint": "从左侧列表选择数据库以查看详情"
+    },
+    "toast": {
+        "loadFailed": "加载数据库列表失败",
+        "detailFailed": "加载数据库详情失败",
+        "queryFailed": "查询表数据失败",
+        "deleteSuccess": "数据库已删除",
+        "deleteFailed": "删除数据库失败",
+        "openFolderFailed": "打开文件夹失败",
+        "invalidFileType": "不支持的文件类型",
+        "uploadSuccess": "数据库上传成功",
+        "uploadFailed": "上传数据库失败",
+        "convertSuccess": "Excel 文件已转换为数据库: {{name}}",
+        "convertFailed": "转换 Excel 文件失败"
+    }
+}
