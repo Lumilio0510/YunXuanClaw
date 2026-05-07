@@ -303,24 +303,27 @@ export function deriveTaskSteps({
   }
 
   // 添加系统状态步骤（正在完成答案/正在准备运行）
-  if (sending && pendingFinal) {
+  // Always show "Preparing run" immediately when sending starts, even before any stream content
+  if (sending) {
+    if (pendingFinal) {
       upsertStep({
         id: 'system-finalizing',
         label: 'Finalizing answer',
         status: 'running',
-      kind: 'system',
-      detail: 'Waiting for the assistant to finish this run.',
-      depth: 1,
-    });
-  } else if (sending && steps.length === 0) {
+        kind: 'system',
+        detail: 'Waiting for the assistant to finish this run.',
+        depth: 1,
+      });
+    } else {
       upsertStep({
         id: 'system-preparing',
         label: 'Preparing run',
         status: 'running',
-      kind: 'system',
-      detail: 'Waiting for the first streaming update.',
-      depth: 1,
-    });
+        kind: 'system',
+        detail: 'Waiting for the first streaming update.',
+        depth: 1,
+      });
+    }
   }
 
   // 附加拓扑结构并限制最大步骤数

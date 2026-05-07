@@ -13,20 +13,13 @@ import { useGatewayStore } from '@/stores/gateway';
 import { useProviderStore } from '@/stores/providers';
 import { hostApiFetch } from '@/lib/host-api';
 import { subscribeHostEvent } from '@/lib/host-events';
-import { CHANNEL_ICONS, CHANNEL_NAMES, type ChannelType } from '@/types/channel';
+import { CHANNEL_NAMES, type ChannelType } from '@/types/channel';
 import type { AgentSummary } from '@/types/agent';
 import type { ProviderAccount, ProviderVendorInfo, ProviderWithKeyInfo } from '@/lib/providers';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import telegramIcon from '@/assets/channels/telegram.svg';
-import discordIcon from '@/assets/channels/discord.svg';
-import whatsappIcon from '@/assets/channels/whatsapp.svg';
-import wechatIcon from '@/assets/channels/wechat.svg';
-import dingtalkIcon from '@/assets/channels/dingtalk.svg';
-import feishuIcon from '@/assets/channels/feishu.svg';
-import wecomIcon from '@/assets/channels/wecom.svg';
-import qqIcon from '@/assets/channels/qq.svg';
+import { ChannelIcon } from '@/components/common/ChannelIcon';
 
 interface ChannelAccountItem {
   accountId: string;
@@ -95,6 +88,7 @@ function hasConfiguredProviderCredentials(
 export function Agents() {
   const { t } = useTranslation('agents');
   const gatewayStatus = useGatewayStore((state) => state.status);
+  const { restart: restartGateway } = useGatewayStore();
   const refreshProviderSnapshot = useProviderStore((state) => state.refreshProviderSnapshot);
   const lastGatewayStateRef = useRef(gatewayStatus.state);
   const {
@@ -111,6 +105,7 @@ export function Agents() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [agentToDelete, setAgentToDelete] = useState<AgentSummary | null>(null);
+  const [restarting, setRestarting] = useState(false);
 
   const fetchChannelAccounts = useCallback(async () => {
     try {
@@ -123,7 +118,7 @@ export function Agents() {
 
   useEffect(() => {
     let mounted = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+     
     void Promise.all([fetchAgents(), fetchChannelAccounts(), refreshProviderSnapshot()]).finally(() => {
       if (mounted) {
         setHasCompletedInitialLoad(true);
@@ -150,7 +145,7 @@ export function Agents() {
     lastGatewayStateRef.current = gatewayStatus.state;
 
     if (previousGatewayState !== 'running' && gatewayStatus.state === 'running') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
+       
       void fetchChannelAccounts();
     }
   }, [fetchChannelAccounts, gatewayStatus.state]);
@@ -165,6 +160,19 @@ export function Agents() {
   const isUsingStableValue = loading && hasCompletedInitialLoad;
   const handleRefresh = () => {
     void Promise.all([fetchAgents(), fetchChannelAccounts()]);
+  };
+
+  const handleSaveAndRestart = async () => {
+    setRestarting(true);
+    try {
+      toast.info(t('toast.restartingGateway'));
+      await restartGateway();
+      toast.success(t('toast.gatewayRestarted'));
+    } catch (error) {
+      toast.error(t('toast.restartFailed', { error: String(error) }));
+    } finally {
+      setRestarting(false);
+    }
   };
 
   if (loading && !hasCompletedInitialLoad) {
@@ -196,6 +204,15 @@ export function Agents() {
             >
               <RefreshCw className={cn('h-3.5 w-3.5 mr-2', isUsingStableValue && 'animate-spin')} />
               {t('refresh')}
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => void handleSaveAndRestart()}
+              disabled={restarting}
+              className="h-9 text-[13px] font-medium rounded-full px-4 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 shadow-none text-foreground/80 hover:text-foreground transition-colors"
+            >
+              <RefreshCw className={cn('h-3.5 w-3.5 mr-2', restarting && 'animate-spin')} />
+              {t('saveAndRestart')}
             </Button>
             <Button
               onClick={() => setShowAddDialog(true)}
@@ -383,26 +400,7 @@ const selectClasses = 'h-[44px] w-full rounded-xl font-sans text-[13px] bg-[#eee
 const labelClasses = 'text-[14px] text-foreground/80 font-bold';
 
 function ChannelLogo({ type }: { type: ChannelType }) {
-  switch (type) {
-    case 'telegram':
-      return <img src={telegramIcon} alt="Telegram" className="w-[20px] h-[20px] dark:invert" />;
-    case 'discord':
-      return <img src={discordIcon} alt="Discord" className="w-[20px] h-[20px] dark:invert" />;
-    case 'whatsapp':
-      return <img src={whatsappIcon} alt="WhatsApp" className="w-[20px] h-[20px] dark:invert" />;
-    case 'wechat':
-      return <img src={wechatIcon} alt="WeChat" className="w-[20px] h-[20px] dark:invert" />;
-    case 'dingtalk':
-      return <img src={dingtalkIcon} alt="DingTalk" className="w-[20px] h-[20px] dark:invert" />;
-    case 'feishu':
-      return <img src={feishuIcon} alt="Feishu" className="w-[20px] h-[20px] dark:invert" />;
-    case 'wecom':
-      return <img src={wecomIcon} alt="WeCom" className="w-[20px] h-[20px] dark:invert" />;
-    case 'qqbot':
-      return <img src={qqIcon} alt="QQ" className="w-[20px] h-[20px] dark:invert" />;
-    default:
-      return <span className="text-[20px] leading-none">{CHANNEL_ICONS[type] || '💬'}</span>;
-  }
+  return <ChannelIcon type={type} size="md" />;
 }
 
 function AddAgentDialog({
@@ -502,20 +500,98 @@ function AgentSettingsModal({
   onClose: () => void;
 }) {
   const { t } = useTranslation('agents');
-  const { updateAgent, defaultModelRef } = useAgentsStore();
+  const { updateAgent, updateAgentModel, defaultModelRef } = useAgentsStore();
+  const providerAccounts = useProviderStore((state) => state.accounts);
+  const providerStatuses = useProviderStore((state) => state.statuses);
+  const providerVendors = useProviderStore((state) => state.vendors);
+  const providerDefaultAccountId = useProviderStore((state) => state.defaultAccountId);
+
   const [name, setName] = useState(agent.name);
   const [savingName, setSavingName] = useState(false);
-  const [showModelModal, setShowModelModal] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+
+  // 模型选择状态
+  const [selectedRuntimeProviderKey, setSelectedRuntimeProviderKey] = useState('');
+  const [modelIdInput, setModelIdInput] = useState('');
+  const [savingModel, setSavingModel] = useState(false);
 
   useEffect(() => {
     setName(agent.name);
   }, [agent.name]);
 
+  // 构建可用的模型选项
+  const runtimeProviderOptions = useMemo<RuntimeProviderOption[]>(() => {
+    const vendorMap = new Map<string, ProviderVendorInfo>(providerVendors.map((vendor) => [vendor.id, vendor]));
+    const statusById = new Map<string, ProviderWithKeyInfo>(providerStatuses.map((status) => [status.id, status]));
+    const entries = providerAccounts
+      .filter((account) => account.enabled && hasConfiguredProviderCredentials(account, statusById))
+      .sort((left, right) => {
+        if (left.id === providerDefaultAccountId) return -1;
+        if (right.id === providerDefaultAccountId) return 1;
+        return right.updatedAt.localeCompare(left.updatedAt);
+      });
+
+    const deduped = new Map<string, RuntimeProviderOption>();
+    for (const account of entries) {
+      const runtimeProviderKey = resolveRuntimeProviderKey(account);
+      if (!runtimeProviderKey || deduped.has(runtimeProviderKey)) continue;
+      const vendor = vendorMap.get(account.vendorId);
+      const label = `${account.label} (${vendor?.name || account.vendorId})`;
+      const configuredModelId = account.model
+        ? (account.model.startsWith(`${runtimeProviderKey}/`)
+          ? account.model.slice(runtimeProviderKey.length + 1)
+          : account.model)
+        : undefined;
+
+      deduped.set(runtimeProviderKey, {
+        runtimeProviderKey,
+        accountId: account.id,
+        label,
+        modelIdPlaceholder: vendor?.modelIdPlaceholder,
+        configuredModelId,
+      });
+    }
+
+    return [...deduped.values()];
+  }, [providerAccounts, providerDefaultAccountId, providerStatuses, providerVendors]);
+
+  // 初始化模型选择
+  useEffect(() => {
+    const override = splitModelRef(agent.overrideModelRef);
+    if (override) {
+      setSelectedRuntimeProviderKey(override.providerKey);
+      setModelIdInput(override.modelId);
+      return;
+    }
+
+    const effective = splitModelRef(agent.modelRef || defaultModelRef);
+    if (effective) {
+      setSelectedRuntimeProviderKey(effective.providerKey);
+      setModelIdInput(effective.modelId);
+      return;
+    }
+
+    setSelectedRuntimeProviderKey(runtimeProviderOptions[0]?.runtimeProviderKey || '');
+    setModelIdInput('');
+  }, [agent.modelRef, agent.overrideModelRef, defaultModelRef, runtimeProviderOptions]);
+
+  const selectedProvider = runtimeProviderOptions.find((option) => option.runtimeProviderKey === selectedRuntimeProviderKey) || null;
+  const trimmedModelId = modelIdInput.trim();
+  const nextModelRef = selectedRuntimeProviderKey && trimmedModelId
+    ? `${selectedRuntimeProviderKey}/${trimmedModelId}`
+    : '';
+  const normalizedDefaultModelRef = (defaultModelRef || '').trim();
+  const isUsingDefaultModelInForm = Boolean(normalizedDefaultModelRef) && nextModelRef === normalizedDefaultModelRef;
+  const currentOverrideModelRef = (agent.overrideModelRef || '').trim();
+  const desiredOverrideModelRef = nextModelRef && nextModelRef !== normalizedDefaultModelRef
+    ? nextModelRef
+    : null;
+  const modelChanged = (desiredOverrideModelRef || '') !== currentOverrideModelRef;
+
   const hasNameChanges = name.trim() !== agent.name;
 
   const handleRequestClose = () => {
-    if (savingName || hasNameChanges) {
+    if (savingName || savingModel || hasNameChanges || modelChanged) {
       setShowCloseConfirm(true);
       return;
     }
@@ -533,6 +609,43 @@ function AgentSettingsModal({
     } finally {
       setSavingName(false);
     }
+  };
+
+  const handleSaveModel = async () => {
+    if (!selectedRuntimeProviderKey) {
+      toast.error(t('toast.agentModelProviderRequired'));
+      return;
+    }
+    if (!trimmedModelId) {
+      toast.error(t('toast.agentModelIdRequired'));
+      return;
+    }
+    if (!modelChanged) return;
+    if (!nextModelRef.includes('/')) {
+      toast.error(t('toast.agentModelInvalid'));
+      return;
+    }
+
+    setSavingModel(true);
+    try {
+      await updateAgentModel(agent.id, desiredOverrideModelRef);
+      toast.success(t('toast.agentModelUpdated'));
+    } catch (error) {
+      toast.error(t('toast.agentModelUpdateFailed', { error: String(error) }));
+    } finally {
+      setSavingModel(false);
+    }
+  };
+
+  const handleUseDefaultModel = () => {
+    const parsedDefault = splitModelRef(normalizedDefaultModelRef);
+    if (!parsedDefault) {
+      setSelectedRuntimeProviderKey('');
+      setModelIdInput('');
+      return;
+    }
+    setSelectedRuntimeProviderKey(parsedDefault.providerKey);
+    setModelIdInput(parsedDefault.modelId);
   };
 
   const assignedChannels = channelGroups.flatMap((group) =>
@@ -606,13 +719,9 @@ function AgentSettingsModal({
                 </p>
                 <p className="font-sans text-[13px] text-foreground">{agent.id}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowModelModal(true)}
-                className="space-y-1 rounded-2xl bg-black/5 dark:bg-white/5 border border-transparent p-4 text-left hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
-              >
+              <div className="space-y-1 rounded-2xl bg-black/5 dark:bg-white/5 border border-transparent p-4">
                 <p className="text-[11px] uppercase tracking-[0.08em] text-muted-foreground/80 font-medium">
-                  {t('settingsDialog.modelLabel')}
+                  {t('settingsDialog.currentModelLabel')}
                 </p>
                 <p className="text-[13.5px] text-foreground">
                   {agent.modelDisplay}
@@ -621,7 +730,100 @@ function AgentSettingsModal({
                 <p className="font-sans text-[12px] text-foreground/70 break-all">
                   {agent.modelRef || defaultModelRef || '-'}
                 </p>
-              </button>
+              </div>
+            </div>
+
+            {/* 模型选择器 */}
+            <div className="space-y-4 rounded-2xl bg-black/5 dark:bg-white/5 border border-transparent p-4">
+              <div>
+                <h3 className="text-lg font-sans text-foreground font-semibold tracking-tight mb-1">
+                  {t('settingsDialog.modelConfigTitle')}
+                </h3>
+                <p className="text-[13px] text-foreground/70">
+                  {t('settingsDialog.modelConfigDescriptionNoRestart')}
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-2">
+                  <Label htmlFor="agent-model-provider" className="text-[13px] text-foreground/80 font-medium">
+                    {t('settingsDialog.modelProviderLabel')}
+                  </Label>
+                  <select
+                    id="agent-model-provider"
+                    value={selectedRuntimeProviderKey}
+                    onChange={(event) => {
+                      const nextProvider = event.target.value;
+                      setSelectedRuntimeProviderKey(nextProvider);
+                      if (!modelIdInput.trim()) {
+                        const option = runtimeProviderOptions.find((candidate) => candidate.runtimeProviderKey === nextProvider);
+                        setModelIdInput(option?.configuredModelId || '');
+                      }
+                    }}
+                    className={selectClasses}
+                  >
+                    <option value="">{t('settingsDialog.modelProviderPlaceholder')}</option>
+                    {runtimeProviderOptions.map((option) => (
+                      <option key={option.runtimeProviderKey} value={option.runtimeProviderKey}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="agent-model-id" className="text-[13px] text-foreground/80 font-medium">
+                    {t('settingsDialog.modelIdLabel')}
+                  </Label>
+                  <Input
+                    id="agent-model-id"
+                    value={modelIdInput}
+                    onChange={(event) => setModelIdInput(event.target.value)}
+                    placeholder={selectedProvider?.modelIdPlaceholder || selectedProvider?.configuredModelId || t('settingsDialog.modelIdPlaceholder')}
+                    className={inputClasses}
+                  />
+                </div>
+
+                {!!nextModelRef && (
+                  <p className="text-[12px] font-sans text-foreground/70 break-all">
+                    {t('settingsDialog.modelPreview')}: <span className="font-medium">{nextModelRef}</span>
+                  </p>
+                )}
+
+                {runtimeProviderOptions.length === 0 && (
+                  <p className="text-[12px] text-amber-600 dark:text-amber-400">
+                    {t('settingsDialog.modelProviderEmpty')}
+                  </p>
+                )}
+
+                <div className="flex items-center gap-2 pt-2">
+                  <Button
+                    variant="outline"
+                    onClick={handleUseDefaultModel}
+                    disabled={savingModel || !normalizedDefaultModelRef || isUsingDefaultModelInForm}
+                    className="h-9 text-[13px] font-medium rounded-full px-4 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 shadow-none text-foreground/80 hover:text-foreground"
+                  >
+                    {t('settingsDialog.useDefaultModel')}
+                  </Button>
+                  <Button
+                    onClick={() => void handleSaveModel()}
+                    disabled={savingModel || !selectedRuntimeProviderKey || !trimmedModelId || !modelChanged}
+                    className="h-9 text-[13px] font-medium rounded-full px-4 shadow-none"
+                  >
+                    {savingModel ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                        {t('common:status.saving')}
+                      </>
+                    ) : (
+                      <>
+                        <Check className="h-4 w-4 mr-2" />
+                        {t('common:actions.save')}
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -670,12 +872,6 @@ function AgentSettingsModal({
           </div>
         </CardContent>
       </Card>
-      {showModelModal && (
-        <AgentModelModal
-          agent={agent}
-          onClose={() => setShowModelModal(false)}
-        />
-      )}
       <ConfirmDialog
         open={showCloseConfirm}
         title={t('settingsDialog.unsavedChangesTitle')}
@@ -685,248 +881,6 @@ function AgentSettingsModal({
         onConfirm={() => {
           setShowCloseConfirm(false);
           setName(agent.name);
-          onClose();
-        }}
-        onCancel={() => setShowCloseConfirm(false)}
-      />
-    </div>
-  );
-}
-
-function AgentModelModal({
-  agent,
-  onClose,
-}: {
-  agent: AgentSummary;
-  onClose: () => void;
-}) {
-  const { t } = useTranslation('agents');
-  const providerAccounts = useProviderStore((state) => state.accounts);
-  const providerStatuses = useProviderStore((state) => state.statuses);
-  const providerVendors = useProviderStore((state) => state.vendors);
-  const providerDefaultAccountId = useProviderStore((state) => state.defaultAccountId);
-  const { updateAgentModel, defaultModelRef } = useAgentsStore();
-  const [selectedRuntimeProviderKey, setSelectedRuntimeProviderKey] = useState('');
-  const [modelIdInput, setModelIdInput] = useState('');
-  const [savingModel, setSavingModel] = useState(false);
-  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
-
-  const runtimeProviderOptions = useMemo<RuntimeProviderOption[]>(() => {
-    const vendorMap = new Map<string, ProviderVendorInfo>(providerVendors.map((vendor) => [vendor.id, vendor]));
-    const statusById = new Map<string, ProviderWithKeyInfo>(providerStatuses.map((status) => [status.id, status]));
-    const entries = providerAccounts
-      .filter((account) => account.enabled && hasConfiguredProviderCredentials(account, statusById))
-      .sort((left, right) => {
-        if (left.id === providerDefaultAccountId) return -1;
-        if (right.id === providerDefaultAccountId) return 1;
-        return right.updatedAt.localeCompare(left.updatedAt);
-      });
-
-    const deduped = new Map<string, RuntimeProviderOption>();
-    for (const account of entries) {
-      const runtimeProviderKey = resolveRuntimeProviderKey(account);
-      if (!runtimeProviderKey || deduped.has(runtimeProviderKey)) continue;
-      const vendor = vendorMap.get(account.vendorId);
-      const label = `${account.label} (${vendor?.name || account.vendorId})`;
-      const configuredModelId = account.model
-        ? (account.model.startsWith(`${runtimeProviderKey}/`)
-          ? account.model.slice(runtimeProviderKey.length + 1)
-          : account.model)
-        : undefined;
-
-      deduped.set(runtimeProviderKey, {
-        runtimeProviderKey,
-        accountId: account.id,
-        label,
-        modelIdPlaceholder: vendor?.modelIdPlaceholder,
-        configuredModelId,
-      });
-    }
-
-    return [...deduped.values()];
-  }, [providerAccounts, providerDefaultAccountId, providerStatuses, providerVendors]);
-
-  useEffect(() => {
-    const override = splitModelRef(agent.overrideModelRef);
-    if (override) {
-      setSelectedRuntimeProviderKey(override.providerKey);
-      setModelIdInput(override.modelId);
-      return;
-    }
-
-    const effective = splitModelRef(agent.modelRef || defaultModelRef);
-    if (effective) {
-      setSelectedRuntimeProviderKey(effective.providerKey);
-      setModelIdInput(effective.modelId);
-      return;
-    }
-
-    setSelectedRuntimeProviderKey(runtimeProviderOptions[0]?.runtimeProviderKey || '');
-    setModelIdInput('');
-  }, [agent.modelRef, agent.overrideModelRef, defaultModelRef, runtimeProviderOptions]);
-
-  const selectedProvider = runtimeProviderOptions.find((option) => option.runtimeProviderKey === selectedRuntimeProviderKey) || null;
-  const trimmedModelId = modelIdInput.trim();
-  const nextModelRef = selectedRuntimeProviderKey && trimmedModelId
-    ? `${selectedRuntimeProviderKey}/${trimmedModelId}`
-    : '';
-  const normalizedDefaultModelRef = (defaultModelRef || '').trim();
-  const isUsingDefaultModelInForm = Boolean(normalizedDefaultModelRef) && nextModelRef === normalizedDefaultModelRef;
-  const currentOverrideModelRef = (agent.overrideModelRef || '').trim();
-  const desiredOverrideModelRef = nextModelRef && nextModelRef !== normalizedDefaultModelRef
-    ? nextModelRef
-    : null;
-  const modelChanged = (desiredOverrideModelRef || '') !== currentOverrideModelRef;
-
-  const handleRequestClose = () => {
-    if (savingModel || modelChanged) {
-      setShowCloseConfirm(true);
-      return;
-    }
-    onClose();
-  };
-
-  const handleSaveModel = async () => {
-    if (!selectedRuntimeProviderKey) {
-      toast.error(t('toast.agentModelProviderRequired'));
-      return;
-    }
-    if (!trimmedModelId) {
-      toast.error(t('toast.agentModelIdRequired'));
-      return;
-    }
-    if (!modelChanged) return;
-    if (!nextModelRef.includes('/')) {
-      toast.error(t('toast.agentModelInvalid'));
-      return;
-    }
-
-    setSavingModel(true);
-    try {
-      await updateAgentModel(agent.id, desiredOverrideModelRef);
-      toast.success(desiredOverrideModelRef ? t('toast.agentModelUpdated') : t('toast.agentModelReset'));
-      onClose();
-    } catch (error) {
-      toast.error(t('toast.agentModelUpdateFailed', { error: String(error) }));
-    } finally {
-      setSavingModel(false);
-    }
-  };
-
-  const handleUseDefaultModel = () => {
-    const parsedDefault = splitModelRef(normalizedDefaultModelRef);
-    if (!parsedDefault) {
-      setSelectedRuntimeProviderKey('');
-      setModelIdInput('');
-      return;
-    }
-    setSelectedRuntimeProviderKey(parsedDefault.providerKey);
-    setModelIdInput(parsedDefault.modelId);
-  };
-
-  return (
-    <div className="fixed inset-0 z-[60] bg-black/50 flex items-center justify-center p-4">
-      <Card className="w-full max-w-xl rounded-3xl border-0 shadow-2xl bg-[#f3f1e9] dark:bg-card overflow-hidden">
-        <CardHeader className="flex flex-row items-start justify-between pb-2">
-          <div>
-            <CardTitle className="text-2xl font-sans font-normal tracking-tight">
-              {t('settingsDialog.modelLabel')}
-            </CardTitle>
-            <CardDescription className="text-[15px] mt-1 text-foreground/70">
-              {t('settingsDialog.modelOverrideDescription', { defaultModel: defaultModelRef || '-' })}
-            </CardDescription>
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleRequestClose}
-            className="rounded-full h-8 w-8 -mr-2 -mt-2 text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5"
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </CardHeader>
-        <CardContent className="space-y-4 p-6 pt-4">
-          <div className="space-y-2">
-            <Label htmlFor="agent-model-provider" className="text-[12px] text-foreground/70">{t('settingsDialog.modelProviderLabel')}</Label>
-            <select
-              id="agent-model-provider"
-              value={selectedRuntimeProviderKey}
-              onChange={(event) => {
-                const nextProvider = event.target.value;
-                setSelectedRuntimeProviderKey(nextProvider);
-                if (!modelIdInput.trim()) {
-                  const option = runtimeProviderOptions.find((candidate) => candidate.runtimeProviderKey === nextProvider);
-                  setModelIdInput(option?.configuredModelId || '');
-                }
-              }}
-              className={selectClasses}
-            >
-              <option value="">{t('settingsDialog.modelProviderPlaceholder')}</option>
-              {runtimeProviderOptions.map((option) => (
-                <option key={option.runtimeProviderKey} value={option.runtimeProviderKey}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="agent-model-id" className="text-[12px] text-foreground/70">{t('settingsDialog.modelIdLabel')}</Label>
-            <Input
-              id="agent-model-id"
-              value={modelIdInput}
-              onChange={(event) => setModelIdInput(event.target.value)}
-              placeholder={selectedProvider?.modelIdPlaceholder || selectedProvider?.configuredModelId || t('settingsDialog.modelIdPlaceholder')}
-              className={inputClasses}
-            />
-          </div>
-          {!!nextModelRef && (
-            <p className="text-[12px] font-sans text-foreground/70 break-all">
-              {t('settingsDialog.modelPreview')}: {nextModelRef}
-            </p>
-          )}
-          {runtimeProviderOptions.length === 0 && (
-            <p className="text-[12px] text-amber-600 dark:text-amber-400">
-              {t('settingsDialog.modelProviderEmpty')}
-            </p>
-          )}
-          <div className="flex items-center justify-end gap-2 pt-2">
-            <Button
-              variant="outline"
-              onClick={handleUseDefaultModel}
-              disabled={savingModel || !normalizedDefaultModelRef || isUsingDefaultModelInForm}
-              className="h-9 text-[13px] font-medium rounded-full px-4 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 shadow-none text-foreground/80 hover:text-foreground"
-            >
-              {t('settingsDialog.useDefaultModel')}
-            </Button>
-            <Button
-              variant="outline"
-              onClick={handleRequestClose}
-              className="h-9 text-[13px] font-medium rounded-full px-4 border-black/10 dark:border-white/10 bg-transparent hover:bg-black/5 dark:hover:bg-white/5 shadow-none text-foreground/80 hover:text-foreground"
-            >
-              {t('common:actions.cancel')}
-            </Button>
-            <Button
-              onClick={() => void handleSaveModel()}
-              disabled={savingModel || !selectedRuntimeProviderKey || !trimmedModelId || !modelChanged}
-              className="h-9 text-[13px] font-medium rounded-full px-4 shadow-none"
-            >
-              {savingModel ? (
-                <RefreshCw className="h-4 w-4 animate-spin" />
-              ) : (
-                t('common:actions.save')
-              )}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      <ConfirmDialog
-        open={showCloseConfirm}
-        title={t('settingsDialog.unsavedChangesTitle')}
-        message={t('settingsDialog.unsavedChangesMessage')}
-        confirmLabel={t('settingsDialog.closeWithoutSaving')}
-        cancelLabel={t('common:actions.cancel')}
-        onConfirm={() => {
-          setShowCloseConfirm(false);
           onClose();
         }}
         onCancel={() => setShowCloseConfirm(false)}

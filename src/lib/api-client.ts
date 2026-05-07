@@ -1043,19 +1043,26 @@ export async function invokeIpc<T>(channel: string, ...args: unknown[]): Promise
 export async function invokeIpcWithRetry<T>(
   channel: string,
   args: unknown[] = [],
-  retries = 1,
-  retryable: AppErrorCode[] = ['TIMEOUT', 'NETWORK'],
+  retries = 2,
+  retryable: AppErrorCode[] = ['TIMEOUT', 'NETWORK', 'RATE_LIMIT', 'GATEWAY'],
 ): Promise<T> {
   let lastError: unknown;
+  const baseDelayMs = 1000;
 
   for (let i = 0; i <= retries; i += 1) {
     try {
       return await invokeApi<T>(channel, ...args);
     } catch (err) {
       lastError = err;
-      if (!(err instanceof AppError) || !retryable.includes(err.code) || i === retries) {
-        throw err;
+      const normalized = normalizeAppError(err);
+
+      if (!retryable.includes(normalized.code) || i === retries) {
+        throw normalized;
       }
+
+      // Exponential backoff: 1s, 2s, 4s...
+      const delay = baseDelayMs * Math.pow(2, i);
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
 

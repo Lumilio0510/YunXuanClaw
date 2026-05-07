@@ -183,7 +183,7 @@ export function Chat() {
     const completionInfos = subagentCompletionInfos
       .slice(idx + 1, segmentEnd)
       .filter((value): value is NonNullable<typeof value> => value != null);
-    const isLatestOpenRun = nextUserIndex === -1 && (sending || pendingFinal || hasAnyStreamContent);
+    const isLatestOpenRun = nextUserIndex === -1 && sending;
     let steps = deriveTaskSteps({
       messages: segmentMessages,
       streamingMessage: isLatestOpenRun ? streamingMessage : null,
@@ -252,9 +252,9 @@ export function Chat() {
 
       {/* 消息区域 */}
       <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
-        <div className="mx-auto flex h-full min-h-0 max-w-6xl flex-col gap-4 lg:flex-row lg:items-stretch">
-          <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto">
-            <div ref={contentRef} className="max-w-4xl space-y-4">
+        <div className="mx-auto h-full max-w-8xl">
+          <div ref={scrollRef} className="h-full min-w-0 overflow-y-auto">
+            <div ref={contentRef} className="max-w-7xl space-y-4">
               {isEmpty ? (
                 <WelcomeScreen />
               ) : (
@@ -341,7 +341,6 @@ export function Chat() {
               )}
             </div>
           </div>
-
         </div>
       </div>
 
@@ -394,8 +393,8 @@ function WelcomeScreen() {
   const { t } = useTranslation('chat');
   const quickActions = [
     { key: 'askQuestions', label: t('welcome.askQuestions') },
-    // { key: 'creativeTasks', label: t('welcome.creativeTasks') },
-    // { key: 'brainstorming', label: t('welcome.brainstorming') },
+    { key: 'creativeTasks', label: t('welcome.creativeTasks') },
+    { key: 'brainstorming', label: t('welcome.brainstorming') },
   ];
 
   return (

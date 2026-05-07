@@ -10,7 +10,6 @@ import { subscribeHostEvent } from '@/lib/host-events';
 import { ChannelConfigModal } from '@/components/channels/ChannelConfigModal';
 import { cn } from '@/lib/utils';
 import {
-  CHANNEL_ICONS,
   CHANNEL_NAMES,
   CHANNEL_META,
   getPrimaryChannels,
@@ -19,15 +18,7 @@ import {
 import { usesPluginManagedQrAccounts } from '@/lib/channel-alias';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
-
-import telegramIcon from '@/assets/channels/telegram.svg';
-import discordIcon from '@/assets/channels/discord.svg';
-import whatsappIcon from '@/assets/channels/whatsapp.svg';
-import wechatIcon from '@/assets/channels/wechat.svg';
-import dingtalkIcon from '@/assets/channels/dingtalk.svg';
-import feishuIcon from '@/assets/channels/feishu.svg';
-import wecomIcon from '@/assets/channels/wecom.svg';
-import qqIcon from '@/assets/channels/qq.svg';
+import { ChannelIcon } from '@/components/common/ChannelIcon';
 
 interface ChannelAccountItem {
   accountId: string;
@@ -554,26 +545,7 @@ export function Channels() {
 }
 
 function ChannelLogo({ type }: { type: ChannelType }) {
-  switch (type) {
-    case 'telegram':
-      return <img src={telegramIcon} alt="Telegram" className="w-[22px] h-[22px] dark:invert" />;
-    case 'discord':
-      return <img src={discordIcon} alt="Discord" className="w-[22px] h-[22px] dark:invert" />;
-    case 'whatsapp':
-      return <img src={whatsappIcon} alt="WhatsApp" className="w-[22px] h-[22px] dark:invert" />;
-    case 'wechat':
-      return <img src={wechatIcon} alt="WeChat" className="w-[22px] h-[22px] dark:invert" />;
-    case 'dingtalk':
-      return <img src={dingtalkIcon} alt="DingTalk" className="w-[22px] h-[22px] dark:invert" />;
-    case 'feishu':
-      return <img src={feishuIcon} alt="Feishu" className="w-[22px] h-[22px] dark:invert" />;
-    case 'wecom':
-      return <img src={wecomIcon} alt="WeCom" className="w-[22px] h-[22px] dark:invert" />;
-    case 'qqbot':
-      return <img src={qqIcon} alt="QQ" className="w-[22px] h-[22px] dark:invert" />;
-    default:
-      return <span className="text-[22px]">{CHANNEL_ICONS[type] || '💬'}</span>;
-  }
+  return <ChannelIcon type={type} size="lg" />;
 }
 
 export default Channels;
