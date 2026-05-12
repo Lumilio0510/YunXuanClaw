@@ -47,35 +47,78 @@ function pruneGatewayEventDedupe(now: number): void {
   }
 }
 
-function buildGatewayEventDedupeKey(event: Record<string, unknown>): string | null {
+function buildGatewayEventDedupeKey(event: Record<string, unknown>): { key: string; crossKey?: string } | null {
   const runId = event.runId != null ? String(event.runId) : '';
   const sessionKey = event.sessionKey != null ? String(event.sessionKey) : '';
   const seq = event.seq != null ? String(event.seq) : '';
   const state = event.state != null ? String(event.state) : '';
-  if (runId || sessionKey || seq || state) {
-    return [runId, sessionKey, seq, state].join('|');
+
+  if (runId || sessionKey || seq) {
+    // Path A: protocol notification with full runId/sessionKey/seq metadata
+    const primaryKey = [runId, sessionKey, seq, state].join('|');
+    // Extract message.id for cross-channel dedup (shared with chat-message path)
+    const message = event.message;
+    const msgId = message && typeof message === 'object'
+      ? (message as Record<string, unknown>).id
+      : null;
+    const crossKey = msgId != null
+      ? `cross:msg-id:${String(msgId)}:${state || 'final'}`
+      : undefined;
+    return { key: primaryKey, crossKey };
   }
+
+  // Path B: chat-message channel — lacks runId/sessionKey/seq.
+  // Use message.id as a stable cross-channel dedup key.
   const message = event.message;
   if (message && typeof message === 'object') {
     const msg = message as Record<string, unknown>;
     const messageId = msg.id != null ? String(msg.id) : '';
+    if (messageId) {
+      return { key: `cross:msg-id:${messageId}:${state || 'final'}` };
+    }
     const stopReason = msg.stopReason ?? msg.stop_reason;
-    if (messageId || stopReason) {
-      return `msg|${messageId}|${String(stopReason ?? '')}`;
+    if (stopReason) {
+      return { key: `msg|${messageId}|${String(stopReason ?? '')}` };
     }
   }
   return null;
 }
 
 function shouldProcessGatewayEvent(event: Record<string, unknown>): boolean {
-  const key = buildGatewayEventDedupeKey(event);
-  if (!key) return true;
+  const result = buildGatewayEventDedupeKey(event);
+  if (!result) return true;
   const now = Date.now();
   pruneGatewayEventDedupe(now);
-  if (gatewayEventDedupe.has(key)) {
-    return false;
-  }
+  const { key, crossKey } = result;
+
+  // Primary dedup: check the main key
+  if (gatewayEventDedupe.has(key)) return false;
+
+  // Cross-channel dedup: if the other path already processed this event
+  // (identified by message.id), treat as duplicate even though keys differ.
+  if (crossKey && gatewayEventDedupe.has(crossKey)) return false;
+
+  // Cross-channel dedup by runId+state: when message.id is missing, the two
+  // channels build different primary keys (notification has sessionKey+seq,
+  // chat-message lacks those).  runId+state is common to both paths so it
+  // serves as a reliable cross-channel dedup key for the same logical event.
+  const runId = event.runId != null ? String(event.runId) : '';
+  const state = event.state != null ? String(event.state) : '';
+  const runKey = runId && state ? `run:${runId}:${state}` : null;
+  if (runKey && gatewayEventDedupe.has(runKey)) return false;
+
   gatewayEventDedupe.set(key, now);
+
+  // Also register the cross-channel key so the other path can detect this event
+  if (crossKey && !gatewayEventDedupe.has(crossKey)) {
+    gatewayEventDedupe.set(crossKey, now + 1);
+  }
+
+  // Register the runId-based key so the other channel can detect this event
+  if (runKey && !gatewayEventDedupe.has(runKey)) {
+    gatewayEventDedupe.set(runKey, now + 2);
+  }
+
   return true;
 }
 

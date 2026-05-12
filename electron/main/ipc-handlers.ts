@@ -22,7 +22,7 @@ import {
 import { syncProxyConfigToOpenClaw } from '../utils/openclaw-proxy';
 import { buildOpenClawControlUiUrl } from '../utils/openclaw-control-ui';
 import { logger } from '../utils/logger';
-import { resolveAgentIdFromChannel } from '../utils/agent-config';
+import { resolveAgentIdFromChannel, listConfiguredAgentIds } from '../utils/agent-config';
 import { resolveAccountIdFromSessionHistory } from '../utils/session-util';
 import {
   saveChannelConfig,
@@ -1211,7 +1211,7 @@ function registerGatewayHandlers(
       const result = await gatewayManager.rpc(method, params, timeoutMs);
       return { success: true, result };
     } catch (error) {
-      logger.warn(`[gateway:rpc] ${method} failed (timeoutMs=${timeoutMs ?? 30000}): ${String(error)}`);
+      logger.warn(`[gateway:rpc] ${method} failed (timeoutMs=${timeoutMs ?? 60000}): ${String(error)}`);
       return { success: false, error: String(error) };
     }
   });
@@ -2495,12 +2495,135 @@ function registerFileHandlers(): void {
 /**
  * Session IPC handlers
  *
- * Performs a soft-delete of a session's JSONL transcript on disk.
+ * Permanently deletes a session's JSONL transcript from disk.
  * sessionKey format: "agent:<agentId>:<suffix>" — e.g. "agent:main:session-1234567890".
  * The JSONL file lives at: ~/.openclaw/agents/<agentId>/sessions/<suffix>.jsonl
- * Renaming to <suffix>.deleted.jsonl hides it from sessions.list.
+ * Both the JSONL file and the sessions.json entry are removed so the session
+ * cannot reappear after a refresh.
  */
 function registerSessionHandlers(): void {
+  // Collect sessions from a single config directory.
+  // Returns a Map of sessionKey → sessionValue, or null if the directory is
+  // unreachable (doesn't exist / no agents configured).
+  async function collectFromDir(
+    configDir: string,
+    agentIds: string[],
+  ): Promise<Record<string, unknown> | null> {
+    const fsP = await import('fs/promises');
+    const allSessions: Record<string, unknown> = {};
+    let anyAgentReachable = false;
+
+    for (const aid of agentIds) {
+      const sessionsDir = join(configDir, 'agents', aid, 'sessions');
+      const sessionsJsonPath = join(sessionsDir, 'sessions.json');
+
+      // Step 1: Read sessions.json (may be empty or missing entries)
+      let sessionsJson: Record<string, unknown> = {};
+      try {
+        const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
+        sessionsJson = JSON.parse(raw) as Record<string, unknown>;
+        anyAgentReachable = true;
+      } catch (e) {
+        logger.debug(`[sessions:list] No sessions.json in ${configDir} for agent ${aid}: ${String(e)}`);
+      }
+
+      // Step 2: Scan disk for actual JSONL files (handles checkpoint/reset cases)
+      let diskJsonlFiles: string[] = [];
+      try {
+        const files = await fsP.readdir(sessionsDir);
+        diskJsonlFiles = files.filter((f) => f.endsWith('.jsonl') && !f.endsWith('.deleted.jsonl'));
+        anyAgentReachable = true;
+      } catch (e) {
+        logger.debug(`[sessions:list] Could not read sessions dir in ${configDir} for agent ${aid}: ${String(e)}`);
+      }
+
+      // Step 3: Build session entries from sessions.json, validating JSONL exists
+      for (const [key, value] of Object.entries(sessionsJson)) {
+        if (key === 'sessions') continue; // skip the array-format wrapper key
+        if (!key || typeof key !== 'string' || value == null) continue;
+
+        // Resolve the JSONL file path for this session entry
+        let jsonlPath: string | undefined;
+        const entry = (typeof value === 'object' && value !== null) ? value as Record<string, unknown> : null;
+        if (entry) {
+          const fileField = (entry.sessionFile ?? entry.file ?? entry.fileName ?? entry.path) as string | undefined;
+          if (fileField) {
+            jsonlPath = fileField.startsWith('/') || fileField.match(/^[A-Za-z]:\\/)
+              ? fileField
+              : join(sessionsDir, fileField.endsWith('.jsonl') ? fileField : `${fileField}.jsonl`);
+          } else {
+            const uuidVal = (entry.id ?? entry.sessionId) as string | undefined;
+            if (uuidVal) jsonlPath = join(sessionsDir, uuidVal.endsWith('.jsonl') ? uuidVal : `${uuidVal}.jsonl`);
+          }
+        } else if (typeof value === 'string') {
+          const v = value as string;
+          jsonlPath = v.startsWith('/') || v.match(/^[A-Za-z]:\\/)
+            ? v
+            : join(sessionsDir, v.endsWith('.jsonl') ? v : `${v}.jsonl`);
+        }
+
+        if (jsonlPath) {
+          try {
+            await fsP.access(jsonlPath);
+            allSessions[key] = value;
+            // Track that this file is accounted for
+            const fileName = jsonlPath.split(/[/\\]/).pop()!;
+            diskJsonlFiles = diskJsonlFiles.filter((f) => f !== fileName);
+          } catch {
+            // JSONL file no longer exists — skip this stale entry
+            continue;
+          }
+        }
+      }
+
+      // Step 4: Add orphaned JSONL files not in sessions.json (e.g. checkpoint sessions)
+      for (const jsonlFile of diskJsonlFiles) {
+        // Derive session key from file name: strip .jsonl, use as suffix
+        const sessionId = jsonlFile.replace(/\.jsonl$/, '');
+        const sessionKey = `agent:${aid}:${sessionId}`;
+        allSessions[sessionKey] = { id: sessionId, file: jsonlFile };
+      }
+    }
+
+    return anyAgentReachable ? allSessions : null;
+  }
+
+  // Direct sessions list - reads sessions.json from disk without Gateway RPC
+  // This is much faster (instant) and avoids Gateway timeout issues
+  ipcMain.handle('sessions:list', async (_, agentId?: string) => {
+    try {
+      // Determine which agents to read
+      let agentIds: string[];
+      if (agentId) {
+        agentIds = [agentId];
+      } else {
+        try {
+          agentIds = await listConfiguredAgentIds();
+        } catch {
+          agentIds = ['main'];
+        }
+      }
+
+      const primaryDir = getOpenClawConfigDir();
+      const allSessions = (await collectFromDir(primaryDir, agentIds)) ?? {};
+
+      // Transform to array format expected by frontend
+      const sessionsArray = Object.entries(allSessions).map(([key, value]) => {
+        const entry = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+        return {
+          key,
+          ...entry, // Include all fields (sessionId, sessionFile, updatedAt, label, etc.)
+        };
+      });
+
+      logger.info(`[sessions:list] Loaded ${sessionsArray.length} sessions from ${agentIds.length} agent(s)`);
+      return { success: true, result: { sessions: sessionsArray } };
+    } catch (err) {
+      logger.error('[sessions:list] Unexpected error:', err);
+      return { success: false, error: String(err) };
+    }
+  });
+
   ipcMain.handle('session:delete', async (_, sessionKey: string) => {
     try {
       if (!sessionKey || !sessionKey.startsWith('agent:')) {
@@ -2590,16 +2713,15 @@ function registerSessionHandlers(): void {
         resolvedSrcPath = join(sessionsDir, uuidFileName!);
       }
 
-      const dstPath = resolvedSrcPath.replace(/\.jsonl$/, '.deleted.jsonl');
       logger.info(`[session:delete] file: ${resolvedSrcPath}`);
 
-      // ── Step 2: rename the JSONL file ──
+      // ── Step 2: permanently delete the JSONL file ──
       try {
         await fsP.access(resolvedSrcPath);
-        await fsP.rename(resolvedSrcPath, dstPath);
-        logger.info(`[session:delete] Renamed ${resolvedSrcPath} → ${dstPath}`);
+        await fsP.unlink(resolvedSrcPath);
+        logger.info(`[session:delete] Deleted ${resolvedSrcPath}`);
       } catch (e) {
-        logger.warn(`[session:delete] Could not rename file: ${String(e)}`);
+        logger.warn(`[session:delete] Could not delete file: ${String(e)}`);
       }
 
       // ── Step 3: remove the entry from sessions.json ──
@@ -2619,12 +2741,79 @@ function registerSessionHandlers(): void {
         logger.info(`[session:delete] Removed "${sessionKey}" from sessions.json`);
       } catch (e) {
         logger.warn(`[session:delete] Could not update sessions.json: ${String(e)}`);
-        // Non-fatal — JSONL rename already done
+      }
+
+      // ── Step 4: notify Gateway to reload sessions ──
+      try {
+        await gatewayManager.rpc('sessions.list', {});
+        logger.info(`[session:delete] Gateway sessions cache refreshed after deletion`);
+      } catch (e) {
+        // Non-fatal — Gateway may not be running or may not support this
+        logger.debug(`[session:delete] Could not refresh Gateway sessions: ${String(e)}`);
       }
 
       return { success: true };
     } catch (err) {
       logger.error(`[session:delete] Unexpected error for ${sessionKey}:`, err);
+      return { success: false, error: String(err) };
+    }
+  });
+
+  // ── session:rename ──
+  ipcMain.handle('session:rename', async (_, sessionKey: string, newLabel: string) => {
+    try {
+      if (!sessionKey || !sessionKey.startsWith('agent:')) {
+        return { success: false, error: `Invalid sessionKey: ${sessionKey}` };
+      }
+
+      const parts = sessionKey.split(':');
+      if (parts.length < 3) {
+        return { success: false, error: `sessionKey has too few parts: ${sessionKey}` };
+      }
+
+      const agentId = parts[1];
+      const openclawConfigDir = getOpenClawConfigDir();
+      const sessionsDir = join(openclawConfigDir, 'agents', agentId, 'sessions');
+      const sessionsJsonPath = join(sessionsDir, 'sessions.json');
+
+      const fsP = await import('fs/promises');
+
+      let sessionsJson: Record<string, unknown> = {};
+      try {
+        const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
+        sessionsJson = JSON.parse(raw) as Record<string, unknown>;
+      } catch (e) {
+        logger.warn(`[session:rename] Could not read sessions.json: ${String(e)}`);
+        return { success: false, error: `Could not read sessions.json: ${String(e)}` };
+      }
+
+      // Update label in the array-format (Shape A): { sessions: [{ key, label, ... }] }
+      if (Array.isArray(sessionsJson.sessions)) {
+        const entry = (sessionsJson.sessions as Array<Record<string, unknown>>)
+          .find((s) => s.key === sessionKey || s.sessionKey === sessionKey);
+        if (entry) {
+          entry.label = newLabel;
+        }
+      }
+
+      // Update label in the object-format (Shape B): { [sessionKey]: { label, ... } }
+      if (sessionsJson[sessionKey] != null && typeof sessionsJson[sessionKey] === 'object') {
+        (sessionsJson[sessionKey] as Record<string, unknown>).label = newLabel;
+      }
+
+      await fsP.writeFile(sessionsJsonPath, JSON.stringify(sessionsJson, null, 2), 'utf8');
+      logger.info(`[session:rename] Updated label for "${sessionKey}" to "${newLabel}"`);
+
+      // Notify Gateway to reload sessions
+      try {
+        await gatewayManager.rpc('sessions.list', {});
+      } catch (e) {
+        logger.debug(`[session:rename] Could not refresh Gateway sessions: ${String(e)}`);
+      }
+
+      return { success: true };
+    } catch (err) {
+      logger.error(`[session:rename] Unexpected error for ${sessionKey}:`, err);
       return { success: false, error: String(err) };
     }
   });

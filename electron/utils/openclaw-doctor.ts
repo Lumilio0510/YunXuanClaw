@@ -110,7 +110,7 @@ async function runDoctorCommandWithArgs(
         ...uvEnv,
         PATH: finalPath,
         OPENCLAW_NO_RESPAWN: '1',
-        OPENCLAW_CONFIG_DIR: getOpenClawConfigDir(),
+        OPENCLAW_STATE_DIR: getOpenClawConfigDir(),
       } as NodeJS.ProcessEnv,
     });
 

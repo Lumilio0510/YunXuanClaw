@@ -94,24 +94,50 @@ export function createHistoryActions(
         // Restore file attachments for user/assistant messages (from cache + text patterns)
         const enrichedMessages = enrichWithCachedImages(filteredMessages);
 
-        // Preserve the optimistic user message during an active send.
-        // The Gateway may not include the user's message in chat.history
-        // until the run completes, causing it to flash out of the UI.
-        let finalMessages = enrichedMessages;
-        const userMsgAt = get().lastUserMessageAt;
-        if (get().sending && userMsgAt) {
-          const userMsMs = toMs(userMsgAt);
-          const hasRecentUser = enrichedMessages.some(
-            (m) => m.role === 'user' && m.timestamp && Math.abs(toMs(m.timestamp) - userMsMs) < 5000,
-          );
-          if (!hasRecentUser) {
-            const currentMsgs = get().messages;
-            const optimistic = [...currentMsgs].reverse().find(
-              (m) => m.role === 'user' && m.timestamp && Math.abs(toMs(m.timestamp) - userMsMs) < 5000,
-            );
-            if (optimistic) {
-              finalMessages = [...enrichedMessages, optimistic];
+        // Deduplicate: merge server history with current local messages.
+        // The local `messages[]` may contain optimistic/snapshot messages with
+        // client-generated IDs that differ from the server's IDs.  A naive
+        // `set({ messages: enrichedMessages })` can cause duplicate bubbles
+        // when the server returns the same content with a different ID.
+        //
+        // Strategy: build a dedup key from role + rounded timestamp + content
+        // text.  Prefer the server version (authoritative ID, richer metadata)
+        // but keep any local-only messages that the server doesn't yet have.
+        const dedupKey = (m: RawMessage): string => {
+          const ts = m.timestamp ? Math.round(toMs(m.timestamp) / 1000) : 0;
+          const text = getMessageText(m.content).slice(0, 200);
+          return `${m.role}|${ts}|${text}`;
+        };
+
+        const serverByKey = new Map<string, RawMessage>();
+        for (const m of enrichedMessages) {
+          const key = dedupKey(m);
+          serverByKey.set(key, m);
+        }
+
+        // Collect local-only messages not present in server history
+        const localOnly: RawMessage[] = [];
+        for (const m of get().messages) {
+          const key = dedupKey(m);
+          if (!serverByKey.has(key)) {
+            localOnly.push(m);
+          }
+        }
+
+        // Merge: server messages (authoritative) + local-only messages (optimistic snapshots)
+        // Insert local-only messages at their chronological position based on timestamp
+        let finalMessages = [...enrichedMessages];
+        if (localOnly.length > 0) {
+          for (const localMsg of localOnly) {
+            const localTs = localMsg.timestamp ? toMs(localMsg.timestamp) : Infinity;
+            let insertIdx = finalMessages.length;
+            for (let i = finalMessages.length - 1; i >= 0; i--) {
+              const ts = finalMessages[i].timestamp;
+              const serverTs = ts != null ? toMs(ts) : 0;
+              if (serverTs <= localTs) break;
+              insertIdx = i;
             }
+            finalMessages.splice(insertIdx, 0, localMsg);
           }
         }
 

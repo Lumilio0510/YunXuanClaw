@@ -584,7 +584,7 @@ export class GatewayManager extends EventEmitter {
   /**
    * Make an RPC call to the Gateway
    */
-  async rpc<T>(method: string, params?: unknown, timeoutMs = 30000): Promise<T> {
+  async rpc<T>(method: string, params?: unknown, timeoutMs = 60000): Promise<T> {
     return new Promise((resolve, reject) => {
       const ws = this.wsHandler.getWebSocket();
       if (!ws || ws.readyState !== WebSocket.OPEN) {

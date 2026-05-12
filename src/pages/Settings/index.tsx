@@ -21,8 +21,8 @@ import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { useSettingsStore } from '@/stores/settings';
 import { useGatewayStore } from '@/stores/gateway';
-import { useUpdateStore } from '@/stores/update';
-import { UpdateSettings } from '@/components/settings/UpdateSettings';
+// import { useUpdateStore } from '@/stores/update';
+// import { UpdateSettings } from '@/components/settings/UpdateSettings';
 import {
   getGatewayWsDiagnosticEnabled,
   invokeIpc,
@@ -69,10 +69,10 @@ export function Settings() {
     setProxyHttpsServer,
     setProxyAllServer,
     setProxyBypassRules,
-    autoCheckUpdate,
-    setAutoCheckUpdate,
-    autoDownloadUpdate,
-    setAutoDownloadUpdate,
+    // autoCheckUpdate,
+    // setAutoCheckUpdate,
+    // autoDownloadUpdate,
+    // setAutoDownloadUpdate,
     devModeUnlocked,
     setDevModeUnlocked,
     telemetryEnabled,
@@ -80,8 +80,8 @@ export function Settings() {
   } = useSettingsStore();
 
   const { status: gatewayStatus, restart: restartGateway } = useGatewayStore();
-  const currentVersion = useUpdateStore((state) => state.currentVersion);
-  const updateSetAutoDownload = useUpdateStore((state) => state.setAutoDownload);
+  // const currentVersion = useUpdateStore((state) => state.currentVersion);
+  // const updateSetAutoDownload = useUpdateStore((state) => state.setAutoDownload);
   const [controlUiInfo, setControlUiInfo] = useState<ControlUiInfo | null>(null);
   const [openclawCliCommand, setOpenclawCliCommand] = useState('');
   const [openclawCliError, setOpenclawCliError] = useState<string | null>(null);
@@ -1057,7 +1057,7 @@ export function Settings() {
           <Separator className="bg-black/5 dark:bg-white/5" />
 
           {/* Updates */}
-          <div>
+          {/* <div>
             <h2 className="text-3xl font-sans text-foreground mb-6 font-normal tracking-tight">
               {t('updates.title')}
             </h2>
@@ -1093,7 +1093,7 @@ export function Settings() {
                 />
               </div>
             </div>
-          </div>
+          </div> */}
 
           <Separator className="bg-black/5 dark:bg-white/5" />
 
@@ -1107,7 +1107,7 @@ export function Settings() {
                 <strong className="text-foreground font-semibold">{t('about.appName')}</strong> - {t('about.tagline')}
               </p>
               <p>{t('about.basedOn')}</p>
-              <p>{t('about.version', { version: currentVersion })}</p>
+              {/* <p>{t('about.version', { version: currentVersion })}</p> */}
               <div className="flex gap-4 pt-3">
                 <Button
                   variant="link"

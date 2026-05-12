@@ -72,5 +72,6 @@
         "withinTwoWeeks": "Within 2 Weeks",
         "withinMonth": "Within 1 Month",
         "older": "Older than 1 Month"
-    }
+    },
+    "noHistory": "No chat history"
 }

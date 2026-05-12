@@ -344,17 +344,17 @@ export function Chat() {
         </div>
       </div>
 
-      {/* 错误提示栏 永久删除RPC超时错误 */}
+      {/* 提示栏 */}
       {error && !error.toLowerCase().includes('timeout') && (
-        <div className="px-4 py-2 bg-destructive/10 border-t border-destructive/20">
+        <div className="px-4 py-2 bg-yellow-500/10 border-t border-yellow-500/20">
           <div className="max-w-4xl mx-auto flex items-center justify-between">
-            <p className="text-sm text-destructive flex items-center gap-2">
+            <p className="text-sm text-yellow-600 flex items-center gap-2">
               <AlertCircle className="h-4 w-4" />
               {error}
             </p>
             <button
               onClick={clearError}
-              className="text-xs text-destructive/60 hover:text-destructive underline"
+              className="text-xs text-yellow-600/60 hover:text-yellow-600 underline"
             >
               {t('common:actions.dismiss')}
             </button>
@@ -399,11 +399,11 @@ function WelcomeScreen() {
 
   return (
     <div className="flex flex-col items-center justify-center text-center h-[60vh]">
-      <h1 className="text-4xl md:text-5xl font-sans text-foreground/80 mb-8 font-normal tracking-tight">
+      <h1 className="text-4xl md:text-5xl font-sans text-foreground/80 mb-8 font-normal tracking-tight max-w-3xl w-full">
         {t('welcome.subtitle')}
       </h1>
 
-      <div className="flex flex-wrap items-center justify-center gap-2.5 max-w-lg w-full">
+      <div className="flex flex-wrap items-center justify-center gap-2.5 max-w-3xl w-full">
         {quickActions.map(({ key, label }) => (
           <button 
             key={key}

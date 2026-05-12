@@ -7,7 +7,15 @@
       "Bash(npx tsc *)",
       "Bash(git init *)",
       "Bash(git add *)",
-      "Bash(git commit -m 'Initial commit: YunXuanClaw project *)"
+      "Bash(git commit -m 'Initial commit: YunXuanClaw project *)",
+      "Bash(setx OPENCLAW_CONFIG_DIR \"%USERPROFILE%\\\\.yuanxuanclaw\")",
+      "Bash(tasklist)",
+      "Bash(findstr /i node)",
+      "Bash(taskkill /f /im node.exe)",
+      "Bash(curl -s -X POST https://mydamoxing.cn/v1/messages -H 'Content-Type: application/json' -H 'x-api-key: sk-taaNyADVOvnvP6VZiqJQErKXoA147tNRqV8jopmNCrhKVdPG' -H 'anthropic-version: 2023-06-01' -d '{\"model\": \"glm-5.1\", \"max_tokens\": 10, \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}')",
+      "Bash(pnpm dev *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }

@@ -116,15 +116,29 @@ export function handleRuntimeEventState(
                 if (currentStream) {
                   const streamRole = currentStream.role;
                   if (streamRole === 'assistant' || streamRole === undefined) {
-                    // Use message's own id if available, otherwise derive a stable one from runId
-                    const snapId = currentStream.id
-                      || `${runId || 'run'}-turn-${s.messages.length}`;
+                    // Use message's own id if available, otherwise derive a stable one
+                    // from tool names so duplicate events produce the same id
+                    let snapId: string;
+                    if (currentStream.id) {
+                      snapId = currentStream.id;
+                    } else {
+                      const names: string[] = [];
+                      if (Array.isArray(currentStream.content)) {
+                        for (const b of currentStream.content as { type?: string; name?: string }[]) {
+                          if ((b.type === 'tool_use' || b.type === 'toolCall') && b.name) {
+                            names.push(b.name);
+                          }
+                        }
+                      }
+                      snapId = `${runId || 'run'}-turn-${names.join('-') || 'snap'}`;
+                    }
                     if (!s.messages.some(m => m.id === snapId)) {
                       snapshotMsgs.push({
                         ...(currentStream as RawMessage),
                         role: 'assistant',
                         id: snapId,
-                      });
+                        _runId: runId,
+                      } as RawMessage);
                     }
                   }
                 }
@@ -143,7 +157,19 @@ export function handleRuntimeEventState(
             }
             const toolOnly = isToolOnlyMessage(finalMsg);
             const hasOutput = hasNonToolAssistantContent(finalMsg);
-            const msgId = finalMsg.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
+            const msgId = finalMsg.id || (toolOnly
+              ? (() => {
+                  const names: string[] = [];
+                  if (Array.isArray(finalMsg.content)) {
+                    for (const b of finalMsg.content as { type?: string; name?: string }[]) {
+                      if ((b.type === 'tool_use' || b.type === 'toolCall') && b.name) {
+                        names.push(b.name);
+                      }
+                    }
+                  }
+                  return `run-${runId || 'tool'}-${names.join('-') || 'unknown'}`;
+                })()
+              : `run-${runId}`);
             set((s) => {
               const nextTools = updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools;
               const streamingTools = hasOutput ? [] : nextTools;
@@ -160,8 +186,13 @@ export function handleRuntimeEventState(
                 : { ...finalMsg, role: (finalMsg.role || 'assistant') as RawMessage['role'], id: msgId };
               const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
 
-              // Check if message already exists (prevent duplicates)
-              const alreadyExists = s.messages.some(m => m.id === msgId);
+              // Check if message already exists (prevent duplicates).
+              // Use both msgId and _runId for cross-path dedup — the same message
+              // can arrive via two IPC channels with different metadata.
+              const storeActiveRunId = get().activeRunId;
+              const alreadyExists = s.messages.some(m => m.id === msgId)
+                || (runId && s.messages.some(m => (m as any)._runId === runId))
+                || (storeActiveRunId && s.messages.some(m => (m as any)._runId === storeActiveRunId));
               if (alreadyExists) {
                 return toolOnly ? {
                   streamingText: '',

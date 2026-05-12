@@ -83,6 +83,14 @@ function readFileAsBase64(file: globalThis.File): Promise<string> {
   });
 }
 
+// ── 案例预设 ──────────────────────────────────────────────────
+
+const EXAMPLE_PROMPTS: Array<{ label: string; prompt: string }> = [
+  { label: '案例一', prompt: '请你根据数据库里的内容，帮我生成一套方案，无线覆盖项目，配置一台核心交换机，5台POE交换机，100个无线AP和一台无线控制器，性价比优先' },
+  { label: '案例二', prompt: '请你根据数据库里的内容，帮我生成一个方案：有个监控网络有200个摄像头，选择一台核心交换机，十台POE交换机，满足监控网络使用要求' },
+  { label: '案例三', prompt: '请你根据数据库里的内容，帮我生成一个方案：我现在有一栋大楼，200个网络点，100个AP点，500个监控点，性价比优先' },
+];
+
 // ── Component ────────────────────────────────────────────────────
 
 export function ChatInput({ onSend, onStop, disabled = false, sending = false, isEmpty = false }: ChatInputProps) {
@@ -538,6 +546,25 @@ export function ChatInput({ onSend, onStop, disabled = false, sending = false, i
             </Button>
           </div>
         </div>
+
+        {/* 案例按钮 */}
+        {isEmpty && EXAMPLE_PROMPTS.length > 0 && (
+          <div className="mt-3 flex items-center justify-center gap-2 flex-wrap">
+            {EXAMPLE_PROMPTS.map((ex, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => {
+                  setInput(ex.prompt);
+                  textareaRef.current?.focus();
+                }}
+                className="rounded-full border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.05] px-4 py-1.5 text-[13px] text-foreground/70 hover:bg-black/[0.07] dark:hover:bg-white/[0.10] hover:text-foreground transition-colors"
+              >
+                {ex.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* 底部状态栏 */}
         <div className="mt-2.5 flex items-center justify-between gap-2 text-[11px] text-muted-foreground/60 px-4">

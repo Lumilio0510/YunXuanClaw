@@ -108,10 +108,9 @@ export async function handleSessionRoutes(
         if (!uuidFileName!.endsWith('.jsonl')) uuidFileName = `${uuidFileName}.jsonl`;
         resolvedSrcPath = join(sessionsDir, uuidFileName!);
       }
-      const dstPath = resolvedSrcPath.replace(/\.jsonl$/, '.deleted.jsonl');
       try {
         await fsP.access(resolvedSrcPath);
-        await fsP.rename(resolvedSrcPath, dstPath);
+        await fsP.unlink(resolvedSrcPath);
       } catch {
         // Non-fatal; still try to update sessions.json.
       }

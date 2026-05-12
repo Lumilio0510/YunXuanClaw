@@ -6,5 +6,7 @@ export function createSessionHistoryActions(set: ChatSet, get: ChatGet): Session
   return {
     ...createSessionActions(set, get),
     ...createHistoryActions(set, get),
+    renameSession: async (_sessionId: string, _newName: string) => {},
+    setSessionFilter: (filter: string) => set({ sessionFilter: filter }),
   };
 }

@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(git config *)",
-      "Bash(git commit -m 'Initial commit: YunXuanClaw project *)"
+      "Bash(git commit -m 'Initial commit: YunXuanClaw project *)",
+      "Bash(pnpm lint *)"
     ]
   }
 }

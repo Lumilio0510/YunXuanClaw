@@ -155,7 +155,7 @@ export function createRuntimeSendActions(set: ChatSet, get: ChatGet): Pick<Runti
         }
         clearHistoryPoll();
         set({
-          error: 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.',
+          error: '目前模型调用量较大，正在等待模型响应中...',
           sending: false,
           activeRunId: null,
           lastUserMessageAt: null,

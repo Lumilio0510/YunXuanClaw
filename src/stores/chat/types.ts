@@ -84,6 +84,10 @@ export interface ChatState {
   /** Last message timestamp (ms) per session key, used for sorting */
   sessionLastActivity: Record<string, number>;
 
+  // Session filter & loading
+  sessionFilter: string;
+  isLoadingSession: boolean;
+
   // Thinking
   showThinking: boolean;
   thinkingLevel: string | null;
@@ -94,6 +98,8 @@ export interface ChatState {
   newSession: () => void;
   deleteSession: (key: string) => Promise<void>;
   cleanupEmptySession: () => void;
+  renameSession: (sessionId: string, newName: string) => Promise<void>;
+  setSessionFilter: (filter: string) => void;
   loadHistory: (quiet?: boolean) => Promise<void>;
   sendMessage: (
     text: string,

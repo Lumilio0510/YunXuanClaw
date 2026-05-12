@@ -6,9 +6,9 @@
         "subtitle": "我能为你做些什么？",
         "askQuestions": "生成产品报价方案",
         "askQuestionsDesc": "处理面向产品报价方案的请求",
-        "creativeTasks": "持续执行",
+        "creativeTasks": "解析Excel表格",
         "creativeTasksDesc": "持续推进多步骤工作",
-        "brainstorming": "多智能体并行"
+        "brainstorming": "产品选型建议"
     },
     "noLogs": "（暂无日志）",
     "toolbar": {
@@ -72,5 +72,6 @@
         "withinTwoWeeks": "两周内",
         "withinMonth": "一个月内",
         "older": "一个月之前"
-    }
+    },
+    "noHistory": "暂无历史记录"
 }

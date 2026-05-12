@@ -17,6 +17,8 @@ import {
   Plus,
   Trash2,
   Cpu,
+  RefreshCw,
+  History,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
@@ -123,6 +125,18 @@ export function Sidebar() {
   const deleteSession = useChatStore((s) => s.deleteSession);
   const loadSessions = useChatStore((s) => s.loadSessions);
   const loadHistory = useChatStore((s) => s.loadHistory);
+  const loading = useChatStore((s) => s.loading);
+
+  const [refreshing, setRefreshing] = useState(false);
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await loadSessions();
+      await loadHistory();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const gatewayStatus = useGatewayStore((s) => s.status);
   const isGatewayRunning = gatewayStatus.state === 'running';
@@ -147,7 +161,7 @@ export function Sidebar() {
   const isOnChat = useLocation().pathname === '/';
 
   const getSessionLabel = (key: string, displayName?: string, label?: string) =>
-    sessionLabels[key] ?? label ?? displayName ?? key;
+    label ?? sessionLabels[key] ?? displayName ?? key;
 
   const { t } = useTranslation(['common', 'chat']);
   const [sessionToDelete, setSessionToDelete] = useState<{ key: string; label: string } | null>(null);
@@ -261,60 +275,83 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {/* Session list — below Settings, only when expanded */}
-      {!sidebarCollapsed && sessions.length > 0 && (
+      {/* Session list — always visible when expanded */}
+      {!sidebarCollapsed && (
         <div className="mt-4 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 space-y-0.5">
-          {sessionBuckets.map((bucket) => (
-            bucket.sessions.length > 0 ? (
-              <div key={bucket.key} className="pt-2">
-                <div className="px-2.5 pb-1 text-[11px] font-medium text-muted-foreground/60 tracking-tight">
-                  {bucket.label}
+          {/* History header with refresh button */}
+          <div className="flex items-center justify-between px-2.5 pb-1">
+            <div className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground/70">
+              <History className="h-3.5 w-3.5" />
+              <span>{t('sidebar.chatHistory')}</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 text-muted-foreground hover:text-foreground"
+              onClick={handleRefresh}
+              disabled={refreshing || loading}
+              title={t('common:actions.refresh')}
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", (refreshing || loading) && "animate-spin")} />
+            </Button>
+          </div>
+          {sessions.length > 0 ? (
+            sessionBuckets.map((bucket) => (
+              bucket.sessions.length > 0 ? (
+                <div key={bucket.key} className="pt-2">
+                  <div className="px-2.5 pb-1 text-[11px] font-medium text-muted-foreground/60 tracking-tight">
+                    {bucket.label}
+                  </div>
+                  {bucket.sessions.map((s) => {
+                    const agentId = getAgentIdFromSessionKey(s.key);
+                    const agentName = agentNameById[agentId] || agentId;
+                    return (
+                      <div key={s.key} className="group relative flex items-center">
+                        <button
+                          onClick={() => { switchSession(s.key); navigate('/'); }}
+                          className={cn(
+                            'w-full text-left rounded-lg px-2.5 py-1.5 text-[13px] transition-colors pr-7',
+                            'hover:bg-black/5 dark:hover:bg-white/5',
+                            isOnChat && currentSessionKey === s.key
+                              ? 'bg-black/5 dark:bg-white/10 text-foreground font-medium'
+                              : 'text-foreground/75',
+                          )}
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="shrink-0 rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-foreground/70 dark:bg-white/[0.08]">
+                              {agentName}
+                            </span>
+                            <span className="truncate">{getSessionLabel(s.key, s.displayName, s.label)}</span>
+                          </div>
+                        </button>
+                        <button
+                          aria-label="Delete session"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSessionToDelete({
+                              key: s.key,
+                              label: getSessionLabel(s.key, s.displayName, s.label),
+                            });
+                          }}
+                          className={cn(
+                            'absolute right-1 flex items-center justify-center rounded p-0.5 transition-opacity',
+                            'opacity-0 group-hover:opacity-100',
+                            'text-muted-foreground hover:text-destructive hover:bg-destructive/10',
+                          )}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-                {bucket.sessions.map((s) => {
-                  const agentId = getAgentIdFromSessionKey(s.key);
-                  const agentName = agentNameById[agentId] || agentId;
-                  return (
-                    <div key={s.key} className="group relative flex items-center">
-                      <button
-                        onClick={() => { switchSession(s.key); navigate('/'); }}
-                        className={cn(
-                          'w-full text-left rounded-lg px-2.5 py-1.5 text-[13px] transition-colors pr-7',
-                          'hover:bg-black/5 dark:hover:bg-white/5',
-                          isOnChat && currentSessionKey === s.key
-                            ? 'bg-black/5 dark:bg-white/10 text-foreground font-medium'
-                            : 'text-foreground/75',
-                        )}
-                      >
-                        <div className="flex min-w-0 items-center gap-2">
-                          <span className="shrink-0 rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-foreground/70 dark:bg-white/[0.08]">
-                            {agentName}
-                          </span>
-                          <span className="truncate">{getSessionLabel(s.key, s.displayName, s.label)}</span>
-                        </div>
-                      </button>
-                      <button
-                        aria-label="Delete session"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSessionToDelete({
-                            key: s.key,
-                            label: getSessionLabel(s.key, s.displayName, s.label),
-                          });
-                        }}
-                        className={cn(
-                          'absolute right-1 flex items-center justify-center rounded p-0.5 transition-opacity',
-                          'opacity-0 group-hover:opacity-100',
-                          'text-muted-foreground hover:text-destructive hover:bg-destructive/10',
-                        )}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null
-          ))}
+              ) : null
+            ))
+          ) : (
+            <div className="px-2.5 py-3 text-[12px] text-muted-foreground/50 text-center">
+              暂无历史记录
+            </div>
+          )}
         </div>
       )}
 

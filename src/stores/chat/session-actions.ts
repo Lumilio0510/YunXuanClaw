@@ -29,11 +29,22 @@ export function createSessionActions(
   return {
     loadSessions: async () => {
       try {
-        const result = await invokeIpc(
-          'gateway:rpc',
-          'sessions.list',
-          {}
-        ) as { success: boolean; result?: Record<string, unknown>; error?: string };
+        // Try direct disk read first (fast, no Gateway dependency)
+        let result = await invokeIpc('sessions:list') as {
+          success: boolean;
+          result?: Record<string, unknown>;
+          error?: string;
+        };
+
+        // Fallback to Gateway RPC if direct read failed
+        if (!result.success || !result.result) {
+          console.log('[loadSessions] Direct read failed, falling back to Gateway RPC:', result.error);
+          result = await invokeIpc(
+            'gateway:rpc',
+            'sessions.list',
+            {}
+          ) as { success: boolean; result?: Record<string, unknown>; error?: string };
+        }
 
         if (result.success && result.result) {
           const data = result.result;
@@ -76,9 +87,14 @@ export function createSessionActions(
             }
           }
           if (!dedupedSessions.find((s) => s.key === nextSessionKey) && dedupedSessions.length > 0) {
-            // Current session not found in the backend list
-            const isNewEmptySession = get().messages.length === 0;
-            if (!isNewEmptySession) {
+            // Current session not found in the backend list — only auto-switch
+            // when the current session is truly empty (no messages, no activity).
+            // Never force-jump away from a session the user is actively using.
+            const { messages, sessionLastActivity, sessionLabels } = get();
+            const hasNoActivity = messages.length === 0
+              && !sessionLastActivity[currentSessionKey]
+              && !sessionLabels[currentSessionKey];
+            if (hasNoActivity) {
               nextSessionKey = dedupedSessions[0].key;
             }
           }
@@ -120,7 +136,7 @@ export function createSessionActions(
                   const r = await invokeIpc(
                     'gateway:rpc',
                     'chat.history',
-                    { sessionKey: session.key, limit: 1000 },
+                    { sessionKey: session.key, limit: 50 },
                   ) as { success: boolean; result?: Record<string, unknown> };
                   if (!r.success || !r.result) return;
                   const msgs = Array.isArray(r.result.messages) ? r.result.messages as RawMessage[] : [];
@@ -191,15 +207,13 @@ export function createSessionActions(
     //
     // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
     // RPC — confirmed by inspecting client.ts, protocol.ts and the full codebase.
-    // Deletion is therefore a local-only UI operation: the session is removed from
-    // the sidebar list and its labels/activity maps are cleared.  The underlying
-    // JSONL history file on disk is intentionally left intact, consistent with the
-    // newSession() design that avoids sessions.reset to preserve history.
+    // Deletion permanently removes the JSONL file and sessions.json entry via IPC,
+    // then notifies the Gateway to refresh its cache.
 
     deleteSession: async (key: string) => {
-      // Soft-delete the session's JSONL transcript on disk.
-      // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
-      // sessions.list skips it automatically.
+      // Permanently delete the session's JSONL transcript from disk.
+      // The main process removes the file so it no longer participates in
+      // model context or consumes disk space.
       try {
         const result = await invokeIpc('session:delete', key) as {
           success: boolean;
@@ -260,7 +274,8 @@ export function createSessionActions(
         && !sessionLastActivity[currentSessionKey]
         && !sessionLabels[currentSessionKey];
       const prefix = getCanonicalPrefixFromSessions(get().sessions) ?? DEFAULT_CANONICAL_PREFIX;
-      const newKey = `${prefix}:session-${Date.now()}`;
+      const nowMs = Date.now();
+      const newKey = `${prefix}:session-${nowMs}`;
       const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
       set((s) => ({
         currentSessionKey: newKey,
@@ -272,9 +287,12 @@ export function createSessionActions(
         sessionLabels: leavingEmpty
           ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
           : s.sessionLabels,
-        sessionLastActivity: leavingEmpty
-          ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
-          : s.sessionLastActivity,
+        sessionLastActivity: {
+          ...(leavingEmpty
+            ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
+            : s.sessionLastActivity),
+          [newKey]: nowMs,
+        },
         messages: [],
         streamingText: '',
         streamingMessage: null,

@@ -5,6 +5,7 @@
  */
 import { create } from 'zustand';
 import { hostApiFetch } from '@/lib/host-api';
+import { invokeIpc } from '@/lib/api-client';
 import { useGatewayStore } from './gateway';
 import { useAgentsStore } from './agents';
 import { buildCronSessionHistoryPath, isCronSessionKey } from './chat/cron-session-utils';
@@ -1015,8 +1016,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   sessionLabels: {},
   sessionLastActivity: {},
 
+  sessionFilter: '',
+  isLoadingSession: false,
+
   showThinking: true,
   thinkingLevel: null,
+
+  setSessionFilter: (filter: string) => set({ sessionFilter: filter }),
 
   // ── Load sessions via sessions.list ──
 
@@ -1032,8 +1038,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     _loadSessionsInFlight = (async () => {
       try {
-        const data = await useGatewayStore.getState().rpc<Record<string, unknown>>('sessions.list', {});
-        if (data) {
+        // Try direct disk read first (fast, no Gateway dependency, verifies files exist)
+        let result = await invokeIpc('sessions:list') as {
+          success: boolean;
+          result?: Record<string, unknown>;
+          error?: string;
+        };
+
+        // Fallback to Gateway RPC if direct read failed, returned no result, or
+        // returned an empty sessions array (e.g. Gateway writes to ~/.openclaw
+        // but the IPC handler reads from ~/.yuanxuanclaw).
+        const ipcSessions = result.success && result.result && Array.isArray((result.result as Record<string, unknown>).sessions)
+          ? (result.result as Record<string, unknown>).sessions as unknown[]
+          : null;
+        if (!ipcSessions || ipcSessions.length === 0) {
+          console.log('[loadSessions] Direct read returned no sessions, falling back to Gateway RPC');
+          result = await invokeIpc(
+            'gateway:rpc',
+            'sessions.list',
+            {},
+          ) as { success: boolean; result?: Record<string, unknown>; error?: string };
+        }
+
+        if (result.success && result.result) {
+          const data = result.result;
           const rawSessions = Array.isArray(data.sessions) ? data.sessions : [];
           const sessions: ChatSession[] = rawSessions.map((s: Record<string, unknown>) => ({
             key: String(s.key || ''),
@@ -1077,16 +1105,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // default ghost key (`agent:main:main`) should yield to real history.
             const hasLocalPendingSession = localSessions.some((session) => session.key === nextSessionKey);
             if (!hasLocalPendingSession) {
-              nextSessionKey = dedupedSessions[0].key;
+              // Pick the most recently active session, not just the first in the list
+              const mostRecent = dedupedSessions.reduce((best, s) =>
+                (s.updatedAt ?? 0) > (best.updatedAt ?? 0) ? s : best
+              );
+              nextSessionKey = mostRecent.key;
             }
           }
 
-          const sessionsWithCurrent = !dedupedSessions.find((s) => s.key === nextSessionKey) && nextSessionKey
-            ? [
-              ...dedupedSessions,
+          // Preserve all local in-memory sessions not yet on disk (e.g. newly created sessions
+          // via "new chat" that haven't had any messages sent yet).
+          const dedupedKeys = new Set(dedupedSessions.map(s => s.key));
+          const localOnlySessions = localSessions.filter(s => !dedupedKeys.has(s.key));
+          let sessionsWithCurrent = [...dedupedSessions, ...localOnlySessions];
+
+          // Ensure the current session key is always present in the sidebar so that
+          // on first launch (before any sessions exist on disk) the default main
+          // session is still visible and clickable. Without this, an empty
+          // sessions.json causes the sidebar to show "no history" even though
+          // chat.history can still serve messages for agent:main:main.
+          if (!sessionsWithCurrent.some((s) => s.key === nextSessionKey)) {
+            sessionsWithCurrent = [
+              ...sessionsWithCurrent,
               { key: nextSessionKey, displayName: nextSessionKey },
-            ]
-            : dedupedSessions;
+            ];
+          }
 
           const discoveredActivity = Object.fromEntries(
             sessionsWithCurrent
@@ -1098,6 +1141,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             sessions: sessionsWithCurrent,
             currentSessionKey: nextSessionKey,
             currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
+            sessionLabels: {},
             sessionLastActivity: {
               ...state.sessionLastActivity,
               ...discoveredActivity,
@@ -1167,7 +1211,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // This prevents the poll timer from firing after the switch and loading
     // the wrong session's history into the new session's view.
     clearHistoryPoll();
-    set((s) => buildSessionSwitchPatch(s, key));
+    set((s) => ({ ...buildSessionSwitchPatch(s, key), isLoadingSession: true }));
     get().loadHistory();
   },
 
@@ -1175,15 +1219,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   //
   // NOTE: The OpenClaw Gateway does NOT expose a sessions.delete (or equivalent)
   // RPC — confirmed by inspecting client.ts, protocol.ts and the full codebase.
-  // Deletion is therefore a local-only UI operation: the session is removed from
-  // the sidebar list and its labels/activity maps are cleared.  The underlying
-  // JSONL history file on disk is intentionally left intact, consistent with the
-  // newSession() design that avoids sessions.reset to preserve history.
+  // Deletion permanently removes the JSONL file and sessions.json entry via IPC,
+  // then notifies the Gateway to refresh its cache.
 
   deleteSession: async (key: string) => {
-    // Soft-delete the session's JSONL transcript on disk.
-    // The main process renames <suffix>.jsonl → <suffix>.deleted.jsonl so that
-    // sessions.list skips it automatically.
+    // Permanently delete the session's JSONL transcript from disk.
+    // The main process removes the file so it no longer participates in
+    // model context or consumes disk space.
     try {
       const result = await hostApiFetch<{
         success: boolean;
@@ -1233,6 +1275,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
+  // ── Rename session ──
+
+  renameSession: async (sessionId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+
+    // Update local store immediately for responsive UI
+    set((s) => {
+      const updatedSessions = s.sessions.map((sess) =>
+        sess.key === sessionId ? { ...sess, label: trimmed } : sess,
+      );
+      return {
+        sessions: updatedSessions,
+        sessionLabels: { ...s.sessionLabels, [sessionId]: trimmed },
+      };
+    });
+
+    // Persist to sessions.json on disk via IPC
+    try {
+      const result = await invokeIpc('session:rename', sessionId, trimmed) as {
+        success: boolean;
+        error?: string;
+      };
+      if (!result.success) {
+        console.warn(`[renameSession] IPC reported failure for ${sessionId}:`, result.error);
+      }
+    } catch (err) {
+      console.warn(`[renameSession] IPC call failed for ${sessionId}:`, err);
+    }
+  },
+
   // ── New session ──
 
   newSession: () => {
@@ -1249,7 +1322,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const prefix = getCanonicalPrefixFromSessionKey(currentSessionKey)
       ?? getCanonicalPrefixFromSessions(sessions)
       ?? DEFAULT_CANONICAL_PREFIX;
-    const newKey = `${prefix}:session-${Date.now()}`;
+    const nowMs = Date.now();
+    const newKey = `${prefix}:session-${nowMs}`;
     const newSessionEntry: ChatSession = { key: newKey, displayName: newKey };
     set((s) => ({
       currentSessionKey: newKey,
@@ -1261,9 +1335,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sessionLabels: leavingEmpty
         ? Object.fromEntries(Object.entries(s.sessionLabels).filter(([k]) => k !== currentSessionKey))
         : s.sessionLabels,
-      sessionLastActivity: leavingEmpty
-        ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
-        : s.sessionLastActivity,
+      sessionLastActivity: {
+        ...(leavingEmpty
+          ? Object.fromEntries(Object.entries(s.sessionLastActivity).filter(([k]) => k !== currentSessionKey))
+          : s.sessionLastActivity),
+        [newKey]: nowMs,
+      },
       messages: [],
       streamingText: '',
       streamingMessage: null,
@@ -1398,7 +1475,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
-      set({ messages: finalMessages, thinkingLevel, loading: false });
+      set({ messages: finalMessages, thinkingLevel, loading: false, isLoadingSession: false });
 
       // Extract first user message text as a session label for display in the toolbar.
       // Skip main sessions (key ends with ":main") — they rely on the Gateway-provided
@@ -1471,10 +1548,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
 
       try {
-        const data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-          'chat.history',
-          { sessionKey: currentSessionKey, limit: 200 },
-        );
+        // On first launch the Gateway WebSocket may not be connected yet
+        // even though the status is "running". Retry a few times with
+        // backoff so the initial history load doesn't silently fail.
+        const MAX_WS_RETRIES = 5;
+        const WS_RETRY_BASE_DELAY_MS = 800;
+        let data: Record<string, unknown> | undefined;
+        for (let attempt = 0; attempt <= MAX_WS_RETRIES; attempt++) {
+          try {
+            data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
+              'chat.history',
+              { sessionKey: currentSessionKey, limit: 200 },
+            );
+            break;
+          } catch (err) {
+            const msg = String(err);
+            const isWsError = msg.includes('not connected') || msg.includes('Gateway not');
+            if (isWsError && attempt < MAX_WS_RETRIES) {
+              const delay = WS_RETRY_BASE_DELAY_MS * (attempt + 1);
+              console.log(`[loadHistory] Gateway WS not ready, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_WS_RETRIES})`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+              // Re-check current session before retry
+              if (!isCurrentSession()) return;
+            } else {
+              throw err;
+            }
+          }
+        }
+
         if (data) {
           let rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
           const thinkingLevel = data.thinkingLevel ? String(data.thinkingLevel) : null;
@@ -1616,7 +1717,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
       clearHistoryPoll();
       set({
-        error: 'No response received from the model. The provider may be unavailable or the API key may have insufficient quota. Please check your provider settings.',
+        error: '目前模型调用量较大，正在等待模型响应中...',
         sending: false,
         activeRunId: null,
         lastUserMessageAt: null,
@@ -1850,15 +1951,35 @@ export const useChatStore = create<ChatState>((set, get) => ({
               if (currentStream) {
                 const streamRole = currentStream.role;
                 if (streamRole === 'assistant' || streamRole === undefined) {
-                  // Use message's own id if available, otherwise derive a stable one from runId
-                  const snapId = currentStream.id
-                    || `${runId || 'run'}-turn-${s.messages.length}`;
+                  // Use message's own id if available, otherwise derive a stable id from
+                  // the streaming content. Do NOT use a monotonically-increasing counter —
+                  // when the same event arrives via both notification and chat-message
+                  // channels, the counter increments between calls, producing different
+                  // ids and defeating deduplication.
+                  let snapId: string;
+                  if (currentStream.id) {
+                    snapId = currentStream.id;
+                  } else {
+                    // Derive a stable suffix from tool names in the streaming content.
+                    // Same content → same suffix (dedup works); different turn → different
+                    // suffix (genuinely distinct snapshots are preserved).
+                    const names: string[] = [];
+                    if (Array.isArray(currentStream.content)) {
+                      for (const b of currentStream.content as ContentBlock[]) {
+                        if ((b.type === 'tool_use' || b.type === 'toolCall') && b.name) {
+                          names.push(b.name);
+                        }
+                      }
+                    }
+                    snapId = `${runId || 'run'}-turn-${names.join('-') || 'snap'}`;
+                  }
                   if (!s.messages.some(m => m.id === snapId)) {
                     snapshotMsgs.push({
                       ...(currentStream as RawMessage),
                       role: 'assistant',
                       id: snapId,
-                    });
+                      _runId: runId,
+                    } as RawMessage);
                   }
                 }
               }
@@ -1877,25 +1998,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           const toolOnly = isToolOnlyMessage(finalMsg);
           const hasOutput = hasNonToolAssistantContent(finalMsg);
-          const msgId = finalMsg.id || (toolOnly ? `run-${runId}-tool-${Date.now()}` : `run-${runId}`);
+          const msgId = finalMsg.id || (toolOnly
+            ? (() => {
+                // Build a deterministic fallback ID from tool names so duplicate
+                // event deliveries produce the same ID (for deduplication).
+                const names: string[] = [];
+                if (Array.isArray(finalMsg.content)) {
+                  for (const b of finalMsg.content as ContentBlock[]) {
+                    if ((b.type === 'tool_use' || b.type === 'toolCall') && b.name) {
+                      names.push(b.name);
+                    }
+                  }
+                }
+                return `run-${runId || 'tool'}-${names.join('-') || 'unknown'}`;
+              })()
+            : `run-${runId}`);
           set((s) => {
             const nextTools = updates.length > 0 ? upsertToolStatuses(s.streamingTools, updates) : s.streamingTools;
             const streamingTools = hasOutput ? [] : nextTools;
 
             // Attach any images collected from preceding tool results
             const pendingImgs = s.pendingToolImages;
-            const msgWithImages: RawMessage = pendingImgs.length > 0
+            const msgWithImages = (pendingImgs.length > 0
               ? {
                 ...finalMsg,
                 role: (finalMsg.role || 'assistant') as RawMessage['role'],
                 id: msgId,
+                _runId: runId,
                 _attachedFiles: [...(finalMsg._attachedFiles || []), ...pendingImgs],
               }
-              : { ...finalMsg, role: (finalMsg.role || 'assistant') as RawMessage['role'], id: msgId };
+              : {
+                ...finalMsg,
+                role: (finalMsg.role || 'assistant') as RawMessage['role'],
+                id: msgId,
+                _runId: runId,
+              }) as RawMessage;
             const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
 
-            // Check if message already exists (prevent duplicates)
-            const alreadyExists = s.messages.some(m => m.id === msgId);
+            // Check if message already exists (prevent duplicates).
+            // Also check _runId: loadHistory may have already loaded the server's version
+            // of this message with a different id, so matching by msgId alone isn't enough.
+            // Gateway may deliver the same message through both the 'chat' protocol event
+            // (with runId/sessionKey) and the 'chat.message_received' notification (without
+            // runId). Fall back to the store's activeRunId so the _runId dedup works when the
+            // duplicate event arrives without a runId of its own.
+            const storeActiveRunId = get().activeRunId;
+            const alreadyExists = s.messages.some(m => m.id === msgId)
+              || (runId && s.messages.some(m => (m as any)._runId === runId))
+              || (storeActiveRunId && s.messages.some(m => (m as any)._runId === storeActiveRunId));
             if (alreadyExists) {
               return toolOnly ? {
                 streamingText: '',
@@ -2042,7 +2192,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   refresh: async () => {
     const { loadHistory, loadSessions } = get();
-    await Promise.all([loadHistory(), loadSessions()]);
+    await loadSessions();
+    await loadHistory();
   },
 
   clearError: () => set({ error: null }),

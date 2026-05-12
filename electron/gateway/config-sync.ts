@@ -429,7 +429,7 @@ export async function prepareGatewayLaunchContext(port: number): Promise<Gateway
     OPENCLAW_SKIP_CHANNELS: skipChannels ? '1' : '',
     CLAWDBOT_SKIP_CHANNELS: skipChannels ? '1' : '',
     OPENCLAW_NO_RESPAWN: '1',
-    OPENCLAW_CONFIG_DIR: getOpenClawConfigDir(),
+    OPENCLAW_STATE_DIR: getOpenClawConfigDir(),
   };
 
   // Ensure extension-specific packages (e.g. grammy from the telegram

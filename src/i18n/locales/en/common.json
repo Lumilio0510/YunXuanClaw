@@ -12,7 +12,8 @@
         "models": "Models",
         "database": "Database",
         "deleteSessionConfirm": "Are you sure you want to delete session \"{{label}}\"?",
-        "openClawPage": "OpenClaw Page"
+        "openClawPage": "OpenClaw Page",
+        "chatHistory": "Chat History"
     },
     "actions": {
         "save": "Save",
