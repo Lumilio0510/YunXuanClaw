@@ -53,6 +53,10 @@ let _loadSessionsInFlight: Promise<void> | null = null;
 let _lastLoadSessionsAt = 0;
 const _historyLoadInFlight = new Map<string, Promise<void>>();
 const _lastHistoryLoadAtBySession = new Map<string, number>();
+// In-memory cache for recently loaded session histories.
+// Avoids Gateway RPC round-trips when switching back to a recently viewed session.
+const _historyCache = new Map<string, { messages: RawMessage[]; thinkingLevel: string | null; cachedAt: number }>();
+const HISTORY_CACHE_MAX_SIZE = 10;
 const SESSION_LOAD_MIN_INTERVAL_MS = 1_200;
 const HISTORY_LOAD_MIN_INTERVAL_MS = 800;
 const HISTORY_POLL_SILENCE_WINDOW_MS = 2_500;
@@ -1137,11 +1141,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
               .map((session) => [session.key, session.updatedAt!]),
           );
 
+          // Populate sessionLabels from labels returned by sessions:list.
+          // The IPC handler now extracts the first user message from each
+          // JSONL file directly (fast local read), so we no longer need the
+          // N+1 Gateway RPC background fetching that was here before.
+          const discoveredLabels: Record<string, string> = {};
+          for (const session of sessionsWithCurrent) {
+            if (session.label && typeof session.label === 'string' && session.label.trim()) {
+              const trimmed = session.label.trim();
+              discoveredLabels[session.key] = trimmed.length > 50 ? `${trimmed.slice(0, 50)}…` : trimmed;
+            }
+          }
+          // Merge with existing labels (preserve labels set by loadHistory
+          // on click) but prune entries for sessions that no longer exist.
+          const currentKeys = new Set(sessionsWithCurrent.map((s) => s.key));
+          const { sessionLabels: prevLabels } = get();
+          const preservedLabels: Record<string, string> = {};
+          for (const [key, val] of Object.entries(prevLabels)) {
+            if (currentKeys.has(key)) preservedLabels[key] = val;
+          }
+          const mergedLabels = { ...preservedLabels, ...discoveredLabels };
+
           set((state) => ({
             sessions: sessionsWithCurrent,
             currentSessionKey: nextSessionKey,
             currentAgentId: getAgentIdFromSessionKey(nextSessionKey),
-            sessionLabels: {},
+            sessionLabels: mergedLabels,
             sessionLastActivity: {
               ...state.sessionLastActivity,
               ...discoveredActivity,
@@ -1150,43 +1175,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
           if (currentSessionKey !== nextSessionKey) {
             void get().loadHistory();
-          }
-
-          // Background: fetch first user message for every non-main session to populate labels upfront.
-          // Uses a small limit so it's cheap; runs in batches to avoid overwhelming Gateway.
-          const CONCURRENCY_LIMIT = 3;
-          const sessionsToLabel = sessionsWithCurrent.filter((s) => !s.key.endsWith(':main'));
-          for (let i = 0; i < sessionsToLabel.length; i += CONCURRENCY_LIMIT) {
-            const batch = sessionsToLabel.slice(i, i + CONCURRENCY_LIMIT);
-            await Promise.all(
-              batch.map(async (session) => {
-                try {
-                  const r = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-                    'chat.history',
-                    { sessionKey: session.key, limit: 1000 },
-                  );
-                  const msgs = Array.isArray(r.messages) ? r.messages as RawMessage[] : [];
-                  const firstUser = msgs.find((m) => m.role === 'user');
-                  const lastMsg = msgs[msgs.length - 1];
-                  set((s) => {
-                    const next: Partial<typeof s> = {};
-                    if (firstUser) {
-                      const labelText = getMessageText(firstUser.content).trim();
-                      if (labelText) {
-                        const truncated = labelText.length > 50 ? `${labelText.slice(0, 50)}…` : labelText;
-                        next.sessionLabels = { ...s.sessionLabels, [session.key]: truncated };
-                      }
-                    }
-                    if (lastMsg?.timestamp) {
-                      next.sessionLastActivity = { ...s.sessionLastActivity, [session.key]: toMs(lastMsg.timestamp) };
-                    }
-                    return next;
-                  });
-                } catch {
-                  // ignore per-session errors
-                }
-              }),
-            );
           }
         }
       } catch (err) {
@@ -1223,6 +1211,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // then notifies the Gateway to refresh its cache.
 
   deleteSession: async (key: string) => {
+    _historyCache.delete(key);
     // Permanently delete the session's JSONL transcript from disk.
     // The main process removes the file so it no longer participates in
     // model context or consumes disk space.
@@ -1394,6 +1383,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
+    // Check in-memory cache — instant display for recently viewed sessions
+    if (!quiet) {
+      const cached = _historyCache.get(currentSessionKey);
+      if (cached) {
+        cached.cachedAt = Date.now();
+        set({ messages: cached.messages, thinkingLevel: cached.thinkingLevel, loading: false, isLoadingSession: false });
+        return;
+      }
+    }
+
     if (!quiet) set({ loading: true, error: null });
 
     // Safety guard: if history loading takes too long, force loading to false
@@ -1454,28 +1453,86 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Restore file attachments for user/assistant messages (from cache + text patterns)
       const enrichedMessages = enrichWithCachedImages(filteredMessages);
 
-      // Preserve the optimistic user message during an active send.
-      // The Gateway may not include the user's message in chat.history
-      // until the run completes, causing it to flash out of the UI.
-      let finalMessages = enrichedMessages;
-      const userMsgAt = get().lastUserMessageAt;
-      if (get().sending && userMsgAt) {
-        const userMsMs = toMs(userMsgAt);
-        const hasRecentUser = enrichedMessages.some(
-          (m) => m.role === 'user' && m.timestamp && Math.abs(toMs(m.timestamp) - userMsMs) < 5000,
-        );
-        if (!hasRecentUser) {
-          const currentMsgs = get().messages;
-          const optimistic = [...currentMsgs].reverse().find(
-            (m) => m.role === 'user' && m.timestamp && Math.abs(toMs(m.timestamp) - userMsMs) < 5000,
-          );
-          if (optimistic) {
-            finalMessages = [...enrichedMessages, optimistic];
-          }
-        }
+      // Deduplicate: merge server history with current local messages.
+      // The local `messages[]` may contain optimistic/snapshot messages with
+      // client-generated IDs that differ from the server's IDs.  A naive
+      // `set({ messages: enrichedMessages })` can cause duplicate bubbles
+      // when the server returns the same content with a different ID.
+      //
+      // Strategy: build a dedup key from role + rounded timestamp + content
+      // text.  Prefer the server version (authoritative ID, richer metadata)
+      // but keep any local-only messages that the server doesn't yet have.
+      //
+      // Additionally, match by content alone (ignoring timestamp) and by
+      // _runId, because:
+      //  1. Streaming messages added by handleChatEvent often lack a
+      //     timestamp, while the server assigns its own on persistence,
+      //     causing the timestamp-based dedup key to differ for the same
+      //     logical message.
+      //  2. _runId is a stable client-side annotation that survives both
+      //     the streaming and server-resolved representations.
+      const dedupKey = (m: RawMessage): string => {
+        const ts = m.timestamp ? Math.round(toMs(m.timestamp) / 1000) : 0;
+        const text = getMessageText(m.content).slice(0, 200);
+        return `${m.role}|${ts}|${text}`;
+      };
+      const contentKey = (m: RawMessage): string => {
+        const text = getMessageText(m.content).slice(0, 200);
+        return `${m.role}|${text}`;
+      };
+
+      const serverByKey = new Map<string, RawMessage>();
+      const serverByContent = new Map<string, RawMessage>();
+      for (const m of enrichedMessages) {
+        serverByKey.set(dedupKey(m), m);
+        serverByContent.set(contentKey(m), m);
       }
 
+      // Collect local-only messages not present in server history
+      const localOnly: RawMessage[] = [];
+      for (const m of get().messages) {
+        // 1st pass: exact match by role + timestamp + content
+        if (serverByKey.has(dedupKey(m))) continue;
+
+        // 2nd pass: match by _runId (stable regardless of timestamp/content)
+        const runId = (m as any)._runId;
+        if (runId && enrichedMessages.some(sm => String((sm as any)._runId ?? '') === String(runId))) {
+          continue;
+        }
+
+        // 3rd pass: match by role + content (ignoring timestamp differences
+        // between streaming messages and persisted server records).
+        if (serverByContent.has(contentKey(m))) continue;
+
+        localOnly.push(m);
+      }
+
+      // Merge: server messages (authoritative) + local-only messages (optimistic snapshots).
+      // O(n log n) via sort + dedup instead of the previous O(n*m) splice loop.
+      const mergedMap = new Map<string, RawMessage>();
+      for (const m of enrichedMessages) mergedMap.set(dedupKey(m), m);
+      for (const m of localOnly) {
+        const key = dedupKey(m);
+        if (!mergedMap.has(key)) mergedMap.set(key, m);
+      }
+      const finalMessages = [...mergedMap.values()].sort((a, b) => {
+        const aTs = a.timestamp ? toMs(a.timestamp) : 0;
+        const bTs = b.timestamp ? toMs(b.timestamp) : 0;
+        return aTs - bTs;
+      });
+
       set({ messages: finalMessages, thinkingLevel, loading: false, isLoadingSession: false });
+
+      // Cache the loaded history so switching back to this session is instant
+      _historyCache.set(currentSessionKey, { messages: finalMessages, thinkingLevel, cachedAt: Date.now() });
+      if (_historyCache.size > HISTORY_CACHE_MAX_SIZE) {
+        let oldestKey = '';
+        let oldestTime = Infinity;
+        for (const [k, v] of _historyCache) {
+          if (v.cachedAt < oldestTime) { oldestTime = v.cachedAt; oldestKey = k; }
+        }
+        if (oldestKey) _historyCache.delete(oldestKey);
+      }
 
       // Extract first user message text as a session label for display in the toolbar.
       // Skip main sessions (key ends with ":main") — they rely on the Gateway-provided
@@ -1632,6 +1689,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (!trimmed && (!attachments || attachments.length === 0)) return;
 
     const targetSessionKey = resolveMainSessionKeyForAgent(targetAgentId) ?? get().currentSessionKey;
+    _historyCache.delete(targetSessionKey);
 
     if (targetSessionKey !== get().currentSessionKey) {
       set((s) => buildSessionSwitchPatch(s, targetSessionKey));
@@ -1840,6 +1898,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Only process events for the current session (when sessionKey is present)
     if (eventSessionKey != null && eventSessionKey !== currentSessionKey) return;
 
+    // Invalidate cache when streaming events arrive — cached data is now stale
+    if (eventSessionKey) _historyCache.delete(eventSessionKey);
+    else _historyCache.delete(currentSessionKey);
+
     // Only process events for the active run (or if no active run set)
     if (activeRunId && runId && runId !== activeRunId) return;
 
@@ -2043,9 +2105,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // runId). Fall back to the store's activeRunId so the _runId dedup works when the
             // duplicate event arrives without a runId of its own.
             const storeActiveRunId = get().activeRunId;
+            // 4th check: compare by role + content text.  When loadHistory has
+            // already loaded the server's version of this message (with a
+            // different id and no _runId), neither of the above checks match.
+            const _text = getMessageText(msgWithImages.content).slice(0, 200);
+            const hasMatchingContent = !!(msgWithImages.role && _text) && s.messages.some(m =>
+              m.role === msgWithImages.role &&
+              getMessageText(m.content).slice(0, 200) === _text
+            );
             const alreadyExists = s.messages.some(m => m.id === msgId)
               || (runId && s.messages.some(m => (m as any)._runId === runId))
-              || (storeActiveRunId && s.messages.some(m => (m as any)._runId === storeActiveRunId));
+              || (storeActiveRunId && s.messages.some(m => (m as any)._runId === storeActiveRunId))
+              || hasMatchingContent;
             if (alreadyExists) {
               return toolOnly ? {
                 streamingText: '',

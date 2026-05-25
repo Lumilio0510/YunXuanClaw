@@ -4,7 +4,7 @@
  * 包含会话选择、思考过程开关、刷新按钮
  * 消息支持 Markdown 渲染和流式输出
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { AlertCircle, Loader2, Sparkles } from 'lucide-react';
 import { useChatStore, type RawMessage } from '@/stores/chat';
 import { useGatewayStore } from '@/stores/gateway';
@@ -19,7 +19,6 @@ import { extractImages, extractText, extractThinking, extractToolUse } from './m
 import { deriveTaskSteps, parseSubagentCompletionInfo } from './task-visualization';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
-import { useStickToBottomInstant } from '@/hooks/use-stick-to-bottom-instant';
 import { useMinLoading } from '@/hooks/use-min-loading';
 
 /**
@@ -61,8 +60,62 @@ export function Chat() {
   const [streamingTimestamp, setStreamingTimestamp] = useState<number>(0);
   // 最小加载时间（避免闪烁）
   const minLoading = useMinLoading(loading && messages.length > 0);
-  // 自动滚动到底部
-  const { contentRef, scrollRef } = useStickToBottomInstant(currentSessionKey);
+  // ── 自动滚动 ──────────────────────────────────────────────────
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
+  const prevMsgLenRef = useRef(messages.length);
+
+  // 追踪用户滚动位置
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const threshold = 80;
+      isNearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, [currentSessionKey]);
+
+  // 消息列表变化时平滑滚动到底部（用户提交 / Agent 返回消息）
+  useEffect(() => {
+    if (messages.length === prevMsgLenRef.current) return;
+    prevMsgLenRef.current = messages.length;
+    scrollRef.current?.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior: 'smooth',
+    });
+  }, [messages.length]);
+
+  // 流式内容增长时自动滚动（仅当用户未向上翻阅历史）
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => {
+      if (isNearBottomRef.current) {
+        scrollRef.current?.scrollTo({
+          top: scrollRef.current.scrollHeight,
+          behavior: 'smooth',
+        });
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [currentSessionKey]);
+
+  // 初始加载 / 切换会话时立即滚动到底部（无闪烁）
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.style.visibility = 'hidden';
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+        el.style.visibility = '';
+      });
+    });
+  }, [currentSessionKey]);
 
   // 组件卸载时清理空会话
   useEffect(() => {

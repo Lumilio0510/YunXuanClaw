@@ -45,7 +45,7 @@ function fixOpenclawAgentsModule(distPath) {
 
   fs.writeFileSync(
     path.join(agentsDir, 'model-catalog.runtime.js'),
-    `export * from "../model-catalog.runtime-BSOGShYk.js";\n`
+    `export { r as loadModelCatalog } from "../model-catalog-D2kYsUen.js";\n`
   );
   console.log('[fix-openclaw] Fixed: agents/model-catalog.runtime.js');
 

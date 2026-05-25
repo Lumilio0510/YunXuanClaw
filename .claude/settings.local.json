@@ -15,7 +15,14 @@
       "Bash(curl -s -X POST https://mydamoxing.cn/v1/messages -H 'Content-Type: application/json' -H 'x-api-key: sk-taaNyADVOvnvP6VZiqJQErKXoA147tNRqV8jopmNCrhKVdPG' -H 'anthropic-version: 2023-06-01' -d '{\"model\": \"glm-5.1\", \"max_tokens\": 10, \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}')",
       "Bash(pnpm dev *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(grep -v -E \"\\\\.js$\")",
+      "Bash(where openclaw *)",
+      "Bash(openclaw --version)",
+      "Bash(openclaw agents *)",
+      "Bash(openclaw models *)",
+      "Bash(pnpm typecheck *)",
+      "Read(//d/my/Softworks/YunXuanClaw-main/electron/main/**)"
     ]
   }
 }

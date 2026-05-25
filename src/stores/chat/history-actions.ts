@@ -100,9 +100,12 @@ export function createHistoryActions(
         // `set({ messages: enrichedMessages })` can cause duplicate bubbles
         // when the server returns the same content with a different ID.
         //
-        // Strategy: build a dedup key from role + rounded timestamp + content
-        // text.  Prefer the server version (authoritative ID, richer metadata)
-        // but keep any local-only messages that the server doesn't yet have.
+        // Strategy: primary dedup by role + rounded timestamp + content text,
+        // with a fallback by message.id for streaming messages whose timestamp
+        // may be absent (Gateway stream events often omit it while history
+        // responses always include it).  Prefer the server version (authoritative
+        // ID, richer metadata) but keep any local-only messages that the server
+        // doesn't yet have.
         const dedupKey = (m: RawMessage): string => {
           const ts = m.timestamp ? Math.round(toMs(m.timestamp) / 1000) : 0;
           const text = getMessageText(m.content).slice(0, 200);
@@ -110,16 +113,19 @@ export function createHistoryActions(
         };
 
         const serverByKey = new Map<string, RawMessage>();
+        const serverById = new Map<string, RawMessage>();
         for (const m of enrichedMessages) {
           const key = dedupKey(m);
           serverByKey.set(key, m);
+          if (m.id) serverById.set(m.id, m);
         }
 
         // Collect local-only messages not present in server history
         const localOnly: RawMessage[] = [];
         for (const m of get().messages) {
           const key = dedupKey(m);
-          if (!serverByKey.has(key)) {
+          const matchedById = !!(m.id && serverById.has(m.id));
+          if (!serverByKey.has(key) && !matchedById) {
             localOnly.push(m);
           }
         }

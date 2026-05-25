@@ -3,9 +3,10 @@
  * Registers all IPC handlers for main-renderer communication
  */
 import { ipcMain, BrowserWindow, shell, dialog, app, nativeImage } from 'electron';
-import { existsSync } from 'node:fs';
+import { existsSync, createReadStream } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, extname, basename } from 'node:path';
+import { createInterface } from 'node:readline';
 import crypto from 'node:crypto';
 import { GatewayManager } from '../gateway/manager';
 import { ClawHubService, ClawHubSearchParams, ClawHubInstallParams, ClawHubUninstallParams } from '../gateway/clawhub';
@@ -2501,6 +2502,113 @@ function registerFileHandlers(): void {
  * Both the JSONL file and the sessions.json entry are removed so the session
  * cannot reappear after a refresh.
  */
+/**
+ * Extract the first user message text from a JSONL session file.
+ * Reads at most ~128 KB / 100 lines to find the first user-role message,
+ * then stops immediately — avoids reading large tool-result lines.
+ */
+/**
+ * Strip metadata prefix from extracted label text.
+ * User messages from webchat include a "Sender (untrusted metadata):" block
+ * followed by a JSON code fence and a "[Day YYYY-MM-DD HH:MM GMT+X]" timestamp.
+ * Remove everything up to and including the timestamp so the label shows the
+ * actual user message text.
+ */
+function cleanLabelText(raw: string): string {
+  return raw
+    // Remove "Sender (untrusted metadata):" and the JSON code block that follows
+    .replace(/^Sender\s*\([^)]*\):\s*```[\s\S]*?```\s*/i, '')
+    // Remove timestamp like "[Sun 2026-05-24 19:25 GMT+8] "
+    .replace(/^\[[A-Z][a-z]{2}\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}\s+GMT[+-]\d+\]\s*/, '')
+    .trim();
+}
+
+async function extractFirstUserMessageLabel(jsonlPath: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let lineCount = 0;
+    const MAX_LINES = 100;
+    let resolved = false;
+
+    let rl: ReturnType<typeof createInterface>;
+    try {
+      rl = createInterface({
+        input: createReadStream(jsonlPath, { encoding: 'utf8', highWaterMark: 128 * 1024 }),
+        crlfDelay: Infinity,
+      });
+    } catch {
+      resolve(null);
+      return;
+    }
+
+    const finish = (value: string | null) => {
+      if (resolved) return;
+      resolved = true;
+      try { rl.close(); } catch { /* ignore */ }
+      resolve(value);
+    };
+
+    rl.on('line', (line) => {
+      if (resolved) return;
+      lineCount++;
+      if (lineCount > MAX_LINES) { finish(null); return; }
+      try {
+        const msg = JSON.parse(line);
+        // OpenClaw JSONL wraps messages in { type: "message", message: { role, content } }.
+        // Unwrap the inner message if present; fall back to the raw object otherwise.
+        const inner = (msg && msg.type === 'message' && msg.message && typeof msg.message === 'object')
+          ? msg.message as Record<string, unknown>
+          : msg;
+        if (inner && inner.role === 'user') {
+          const content = inner.content;
+          let text = '';
+          if (typeof content === 'string') {
+            text = content;
+          } else if (Array.isArray(content)) {
+            const textBlock = content.find((b: unknown) =>
+              b && typeof b === 'object' && (b as Record<string, unknown>).type === 'text'
+            ) as { text?: string } | undefined;
+            text = textBlock?.text ?? '';
+          }
+          const cleaned = cleanLabelText(text);
+          finish(cleaned || null);
+        }
+      } catch {
+        // Skip unparseable lines
+      }
+    });
+
+    rl.on('close', () => { finish(null); });
+    rl.on('error', () => { finish(null); });
+  });
+}
+
+/**
+ * Resolve the JSONL file path for a session entry in sessions.json.
+ * Returns the absolute path on disk, or undefined if unresolvable.
+ */
+function resolveSessionJsonlPath(
+  entry: Record<string, unknown> | null,
+  rawValue: unknown,
+  sessionsDir: string,
+): string | undefined {
+  if (entry) {
+    const fileField = (entry.sessionFile ?? entry.file ?? entry.fileName ?? entry.path) as string | undefined;
+    if (fileField) {
+      return fileField.startsWith('/') || fileField.match(/^[A-Za-z]:\\/)
+        ? fileField
+        : join(sessionsDir, fileField.endsWith('.jsonl') ? fileField : `${fileField}.jsonl`);
+    }
+    const uuidVal = (entry.id ?? entry.sessionId) as string | undefined;
+    if (uuidVal) return join(sessionsDir, uuidVal.endsWith('.jsonl') ? uuidVal : `${uuidVal}.jsonl`);
+  } else if (typeof rawValue === 'string') {
+    const v = rawValue as string;
+    return v.startsWith('/') || v.match(/^[A-Za-z]:\\/)
+      ? v
+      : join(sessionsDir, v.endsWith('.jsonl') ? v : `${v}.jsonl`);
+  }
+  return undefined;
+}
+
 function registerSessionHandlers(): void {
   // Collect sessions from a single config directory.
   // Returns a Map of sessionKey → sessionValue, or null if the directory is
@@ -2528,60 +2636,85 @@ function registerSessionHandlers(): void {
       }
 
       // Step 2: Scan disk for actual JSONL files (handles checkpoint/reset cases)
-      let diskJsonlFiles: string[] = [];
+      const diskJsonlFileSet = new Set<string>();
+      let diskScanOk = false;
       try {
         const files = await fsP.readdir(sessionsDir);
-        diskJsonlFiles = files.filter((f) => f.endsWith('.jsonl') && !f.endsWith('.deleted.jsonl'));
+        for (const f of files) {
+          if (f.endsWith('.jsonl') && !f.endsWith('.deleted.jsonl')) {
+            diskJsonlFileSet.add(f);
+          }
+        }
+        diskScanOk = true;
         anyAgentReachable = true;
       } catch (e) {
         logger.debug(`[sessions:list] Could not read sessions dir in ${configDir} for agent ${aid}: ${String(e)}`);
       }
 
       // Step 3: Build session entries from sessions.json, validating JSONL exists
+      // Uses diskJsonlFileSet for O(1) lookup instead of per-entry fs.access
       for (const [key, value] of Object.entries(sessionsJson)) {
         if (key === 'sessions') continue; // skip the array-format wrapper key
         if (!key || typeof key !== 'string' || value == null) continue;
 
-        // Resolve the JSONL file path for this session entry
-        let jsonlPath: string | undefined;
         const entry = (typeof value === 'object' && value !== null) ? value as Record<string, unknown> : null;
-        if (entry) {
-          const fileField = (entry.sessionFile ?? entry.file ?? entry.fileName ?? entry.path) as string | undefined;
-          if (fileField) {
-            jsonlPath = fileField.startsWith('/') || fileField.match(/^[A-Za-z]:\\/)
-              ? fileField
-              : join(sessionsDir, fileField.endsWith('.jsonl') ? fileField : `${fileField}.jsonl`);
-          } else {
-            const uuidVal = (entry.id ?? entry.sessionId) as string | undefined;
-            if (uuidVal) jsonlPath = join(sessionsDir, uuidVal.endsWith('.jsonl') ? uuidVal : `${uuidVal}.jsonl`);
-          }
-        } else if (typeof value === 'string') {
-          const v = value as string;
-          jsonlPath = v.startsWith('/') || v.match(/^[A-Za-z]:\\/)
-            ? v
-            : join(sessionsDir, v.endsWith('.jsonl') ? v : `${v}.jsonl`);
-        }
+        const jsonlPath = resolveSessionJsonlPath(entry, value, sessionsDir);
 
-        if (jsonlPath) {
+        if (jsonlPath && diskScanOk) {
+          const fileName = jsonlPath.split(/[/\\]/).pop()!;
+          if (diskJsonlFileSet.has(fileName)) {
+            allSessions[key] = value;
+            diskJsonlFileSet.delete(fileName); // mark as accounted for
+          }
+          // else: JSONL file no longer exists — skip this stale entry
+        } else if (jsonlPath) {
+          // Fallback when readdir failed: verify individually
           try {
             await fsP.access(jsonlPath);
             allSessions[key] = value;
-            // Track that this file is accounted for
-            const fileName = jsonlPath.split(/[/\\]/).pop()!;
-            diskJsonlFiles = diskJsonlFiles.filter((f) => f !== fileName);
           } catch {
-            // JSONL file no longer exists — skip this stale entry
-            continue;
+            // stale entry, skip
           }
         }
       }
 
       // Step 4: Add orphaned JSONL files not in sessions.json (e.g. checkpoint sessions)
-      for (const jsonlFile of diskJsonlFiles) {
-        // Derive session key from file name: strip .jsonl, use as suffix
+      for (const jsonlFile of diskJsonlFileSet) {
         const sessionId = jsonlFile.replace(/\.jsonl$/, '');
         const sessionKey = `agent:${aid}:${sessionId}`;
         allSessions[sessionKey] = { id: sessionId, file: jsonlFile };
+      }
+    }
+
+    // Step 5: Extract labels for sessions without one by peeking at
+    // the first user message in the JSONL file. Much faster than Gateway
+    // RPC — direct local file read, stops at the first user line.
+    const LABEL_CONCURRENCY = 10;
+    const entriesToLabel = Object.entries(allSessions).filter(([, value]) => {
+      const entry = (typeof value === 'object' && value !== null) ? value as Record<string, unknown> : null;
+      return !entry?.label || (typeof entry.label === 'string' && !entry.label.trim());
+    });
+
+    if (entriesToLabel.length > 0) {
+      for (let i = 0; i < entriesToLabel.length; i += LABEL_CONCURRENCY) {
+        const batch = entriesToLabel.slice(i, i + LABEL_CONCURRENCY);
+        await Promise.all(
+          batch.map(async ([key, value]) => {
+            const entry = (typeof value === 'object' && value !== null) ? value as Record<string, unknown> : null;
+            const agentId = key.startsWith('agent:') ? key.split(':')[1] : 'main';
+            const sessionsDir = join(configDir, 'agents', agentId, 'sessions');
+            const jsonlPath = resolveSessionJsonlPath(entry, value, sessionsDir);
+            if (!jsonlPath) return;
+            try {
+              const label = await extractFirstUserMessageLabel(jsonlPath);
+              if (label && entry) {
+                entry.label = label;
+              }
+            } catch {
+              // ignore per-file errors
+            }
+          }),
+        );
       }
     }
 

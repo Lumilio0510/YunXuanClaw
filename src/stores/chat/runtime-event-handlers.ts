@@ -186,6 +186,10 @@ export function handleRuntimeEventState(
                 : { ...finalMsg, role: (finalMsg.role || 'assistant') as RawMessage['role'], id: msgId };
               const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
 
+              // Tag the message with the run ID so loadHistory can deduplicate
+              // it even when timestamps differ between streaming and server data.
+              const msgWithRunId: RawMessage = { ...msgWithImages, _runId: runId } as RawMessage;
+
               // Check if message already exists (prevent duplicates).
               // Use both msgId and _runId for cross-path dedup — the same message
               // can arrive via two IPC channels with different metadata.
@@ -211,14 +215,14 @@ export function handleRuntimeEventState(
                 };
               }
               return toolOnly ? {
-                messages: [...s.messages, msgWithImages],
+                messages: [...s.messages, msgWithRunId],
                 streamingText: '',
                 streamingMessage: null,
                 pendingFinal: true,
                 streamingTools,
                 ...clearPendingImages,
               } : {
-                messages: [...s.messages, msgWithImages],
+                messages: [...s.messages, msgWithRunId],
                 streamingText: '',
                 streamingMessage: null,
                 sending: hasOutput ? false : s.sending,

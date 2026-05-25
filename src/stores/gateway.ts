@@ -47,6 +47,30 @@ function pruneGatewayEventDedupe(now: number): void {
   }
 }
 
+/**
+ * Build a content-based dedup fingerprint from a message object.
+ * Normalises whitespace and truncates to 100 chars so minor formatting
+ * differences don't break dedup, while remaining specific enough to
+ * avoid false collisions across genuinely different messages.
+ */
+function computeMessageFingerprint(msg: Record<string, unknown>): string | null {
+  const role = msg.role ? String(msg.role) : 'unknown';
+  const content = msg.content;
+  let text = '';
+  if (typeof content === 'string') {
+    text = content;
+  } else if (Array.isArray(content)) {
+    // Flatten content blocks: use text for text blocks, name for tool_use blocks
+    text = (content as Array<Record<string, unknown>>)
+      .map(b => String(b.text ?? b.name ?? ''))
+      .filter(Boolean)
+      .join(' ');
+  }
+  const fingerprint = text.replace(/\s+/g, ' ').trim().slice(0, 100);
+  if (!fingerprint) return null;
+  return `${role}|${fingerprint}`;
+}
+
 function buildGatewayEventDedupeKey(event: Record<string, unknown>): { key: string; crossKey?: string } | null {
   const runId = event.runId != null ? String(event.runId) : '';
   const sessionKey = event.sessionKey != null ? String(event.sessionKey) : '';
@@ -58,12 +82,15 @@ function buildGatewayEventDedupeKey(event: Record<string, unknown>): { key: stri
     const primaryKey = [runId, sessionKey, seq, state].join('|');
     // Extract message.id for cross-channel dedup (shared with chat-message path)
     const message = event.message;
-    const msgId = message && typeof message === 'object'
-      ? (message as Record<string, unknown>).id
+    const msg = message && typeof message === 'object'
+      ? (message as Record<string, unknown>)
       : null;
+    const msgId = msg?.id ?? null;
     const crossKey = msgId != null
       ? `cross:msg-id:${String(msgId)}:${state || 'final'}`
-      : undefined;
+      // When message.id is missing, fall back to content fingerprint so the
+      // chat-message channel can still dedup against this event.
+      : (msg ? buildContentCrossKey(msg, state) : undefined);
     return { key: primaryKey, crossKey };
   }
 
@@ -80,8 +107,19 @@ function buildGatewayEventDedupeKey(event: Record<string, unknown>): { key: stri
     if (stopReason) {
       return { key: `msg|${messageId}|${String(stopReason ?? '')}` };
     }
+    // Fallback: content fingerprint for dedup when id and stopReason are missing.
+    // Same key format as buildContentCrossKey so cross-channel dedup works.
+    const fingerprint = computeMessageFingerprint(msg);
+    if (fingerprint) {
+      return { key: `content:${fingerprint}:${state || 'final'}` };
+    }
   }
   return null;
+}
+
+function buildContentCrossKey(msg: Record<string, unknown>, state: string): string | undefined {
+  const fingerprint = computeMessageFingerprint(msg);
+  return fingerprint ? `content:${fingerprint}:${state || 'final'}` : undefined;
 }
 
 function shouldProcessGatewayEvent(event: Record<string, unknown>): boolean {
