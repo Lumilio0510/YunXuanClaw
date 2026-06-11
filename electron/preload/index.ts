@@ -133,6 +133,7 @@ const electronAPI = {
         // Session management
         'sessions:list',
         'session:delete',
+        'chat:history',
         // OpenClaw extras
         'openclaw:getDir',
         'openclaw:getConfigDir',

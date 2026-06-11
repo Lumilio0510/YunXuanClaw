@@ -19,6 +19,7 @@ import {
   type RawMessage,
   type ToolStatus,
 } from './chat/types';
+import { normalizeReasoningContent } from './chat/helpers';
 
 export type {
   AttachedFileMeta,
@@ -111,6 +112,7 @@ function isDuplicateChatEvent(eventState: string, event: Record<string, unknown>
   const now = Date.now();
   pruneChatEventDedupe(now);
   if (_chatEventDedupe.has(key)) {
+    console.log(`[dedup] isDuplicateChatEvent hit — state=${eventState} key=${key}`);
     return true;
   }
   _chatEventDedupe.set(key, now);
@@ -160,6 +162,16 @@ function getMessageText(content: unknown): string {
       .join('\n');
   }
   return '';
+}
+
+/** Normalize whitespace for content-based dedup: collapse all whitespace runs to single space.
+ *  This matches computeMessageFingerprint in gateway.ts so cross-channel dedup shares
+ *  the same normalization, and it defends against line-ending differences (\\r\\n vs \\n)
+ *  that can arise when the Gateway stores messages on Windows but delivers events via
+ *  WebSocket JSON — both represent the same logical message, but getMessageText returns
+ *  different strings, defeating the contentKey comparison in applyLoadedMessages. */
+function getMessageTextNormalized(content: unknown): string {
+  return getMessageText(content).replace(/\s+/g, ' ').trim();
 }
 
 /** Extract media file refs from [media attached: <path> (<mime>) | ...] patterns */
@@ -998,6 +1010,38 @@ function hasNonToolAssistantContent(message: RawMessage | undefined): boolean {
   return false;
 }
 
+/**
+ * Compute a stable content-identity key for deduplication.
+ * Includes role, text content, AND tool call signatures so that:
+ *  - Text-only messages dedup by role + text.
+ *  - Tool-use messages dedup by role + tool names + inputs (not just empty text).
+ *  - Different tool calls in the same run produce DIFFERENT keys (preserved).
+ *  - The same message arriving via different channels produces the SAME key (deduped).
+ */
+function computeContentKey(msg: RawMessage): string {
+  const role = msg.role ?? '';
+  const text = getMessageTextNormalized(msg.content).slice(0, 200);
+  const toolParts: string[] = [];
+  if (Array.isArray(msg.content)) {
+    for (const block of msg.content as ContentBlock[]) {
+      const rb = block as unknown as Record<string, unknown>;
+      if ((block.type === 'tool_use' || block.type === 'toolCall') && block.name) {
+        const rawInput = rb.input;
+        const input = rawInput !== undefined
+          ? JSON.stringify(rawInput).replace(/\s+/g, ' ').trim().slice(0, 100)
+          : '';
+        toolParts.push(`use:${block.name}:${input}`);
+      }
+      if (block.type === 'tool_result' && rb.toolCallId) {
+        const resultText = getMessageTextNormalized(rb.content).slice(0, 80);
+        toolParts.push(`result:${String(rb.toolCallId)}:${resultText}`);
+      }
+    }
+  }
+  toolParts.sort();
+  return `${role}|${text}|${toolParts.join('|')}`;
+}
+
 // ── Store ────────────────────────────────────────────────────────
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -1477,7 +1521,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return `${m.role}|${ts}|${text}`;
       };
       const contentKey = (m: RawMessage): string => {
-        const text = getMessageText(m.content).slice(0, 200);
+        const text = getMessageTextNormalized(m.content).slice(0, 200);
         return `${m.role}|${text}`;
       };
 
@@ -1502,7 +1546,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         // 3rd pass: match by role + content (ignoring timestamp differences
         // between streaming messages and persisted server records).
-        if (serverByContent.has(contentKey(m))) continue;
+        // BUT: only match if it's truly the SAME logical message (persisted
+        // version), not a different message that happens to have the same content
+        // (e.g. the agent sends the same greeting across multiple turns).
+        {
+          const matched = serverByContent.get(contentKey(m));
+          if (matched) {
+            const localTs = m.timestamp ? toMs(m.timestamp) : null;
+            const matchedTs = matched.timestamp ? toMs(matched.timestamp) : null;
+            let sameMessage = false;
+            if (localTs !== null && matchedTs !== null) {
+              // Both have timestamps — check proximity (within 2 min)
+              sameMessage = Math.abs(localTs - matchedTs) < 120_000;
+            } else if (matchedTs !== null && localTs === null) {
+              // Local is a streaming message (no timestamp) — the matched
+              // server message is the persisted version if it was created recently.
+              sameMessage = (Date.now() - matchedTs) < 120_000;
+            } else if (matchedTs === null) {
+              // Server has no timestamp either — conservative match
+              sameMessage = true;
+            }
+            if (sameMessage) continue;
+          }
+        }
 
         localOnly.push(m);
       }
@@ -1515,11 +1581,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const key = dedupKey(m);
         if (!mergedMap.has(key)) mergedMap.set(key, m);
       }
+      const beforeCount = get().messages.length;
       const finalMessages = [...mergedMap.values()].sort((a, b) => {
         const aTs = a.timestamp ? toMs(a.timestamp) : 0;
         const bTs = b.timestamp ? toMs(b.timestamp) : 0;
         return aTs - bTs;
       });
+
+      if (finalMessages.length !== beforeCount) {
+        console.log(`[applyLoadedMessages] BEFORE=${beforeCount} AFTER=${finalMessages.length} server=${enrichedMessages.length} localOnly=${localOnly.length} mergedMap=${mergedMap.size}`);
+      }
 
       set({ messages: finalMessages, thinkingLevel, loading: false, isLoadingSession: false });
 
@@ -1605,41 +1676,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
 
       try {
-        // On first launch the Gateway WebSocket may not be connected yet
-        // even though the status is "running". Retry a few times with
-        // backoff so the initial history load doesn't silently fail.
-        const MAX_WS_RETRIES = 5;
-        const WS_RETRY_BASE_DELAY_MS = 800;
-        let data: Record<string, unknown> | undefined;
-        for (let attempt = 0; attempt <= MAX_WS_RETRIES; attempt++) {
-          try {
-            data = await useGatewayStore.getState().rpc<Record<string, unknown>>(
-              'chat.history',
-              { sessionKey: currentSessionKey, limit: 200 },
-            );
-            break;
-          } catch (err) {
-            const msg = String(err);
-            const isWsError = msg.includes('not connected') || msg.includes('Gateway not');
-            if (isWsError && attempt < MAX_WS_RETRIES) {
-              const delay = WS_RETRY_BASE_DELAY_MS * (attempt + 1);
-              console.log(`[loadHistory] Gateway WS not ready, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_WS_RETRIES})`);
-              await new Promise(resolve => setTimeout(resolve, delay));
-              // Re-check current session before retry
-              if (!isCurrentSession()) return;
-            } else {
-              throw err;
-            }
+        // Direct read from JSONL via IPC — no Gateway dependency, no WS wait.
+        let rawMessages: RawMessage[] = [];
+        let thinkingLevel: string | null = null;
+        let loadedFromIpc = false;
+
+        try {
+          const ipcResult = await invokeIpc<{ success: boolean; result?: { messages: RawMessage[] }; error?: string }>(
+            'chat:history',
+            currentSessionKey,
+            200,
+          );
+          if (ipcResult.success && ipcResult.result?.messages) {
+            rawMessages = ipcResult.result.messages;
+            loadedFromIpc = true;
           }
+        } catch (ipcErr) {
+          // IPC read failed — treat as no history available
         }
 
-        if (data) {
-          let rawMessages = Array.isArray(data.messages) ? data.messages as RawMessage[] : [];
-          const thinkingLevel = data.thinkingLevel ? String(data.thinkingLevel) : null;
+        if (loadedFromIpc || rawMessages.length > 0) {
           if (rawMessages.length === 0 && isCronSessionKey(currentSessionKey)) {
             rawMessages = await loadCronFallbackMessages(currentSessionKey, 200);
           }
-
           applyLoadedMessages(rawMessages, thinkingLevel);
         } else {
           const fallbackMessages = await loadCronFallbackMessages(currentSessionKey, 200);
@@ -1760,7 +1819,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     _historyPollTimer = setTimeout(pollHistory, POLL_START_DELAY);
 
-    const SAFETY_TIMEOUT_MS = 90_000;
+    const SAFETY_TIMEOUT_MS = 180_000;
     const checkStuck = () => {
       const state = get();
       if (!state.sending) return;
@@ -1895,6 +1954,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const eventSessionKey = event.sessionKey != null ? String(event.sessionKey) : null;
     const { activeRunId, currentSessionKey } = get();
 
+    // Log all incoming events for duplicate debugging
+    console.log(`[chat-event] state=${eventState} runId=${runId || 'none'} sessionKey=${eventSessionKey || 'none'} hasMsg=${!!event.message} msgId=${(event.message && typeof event.message === 'object') ? String((event.message as Record<string, unknown>).id ?? 'none') : 'none'}`);
+
     // Only process events for the current session (when sessionKey is present)
     if (eventSessionKey != null && eventSessionKey !== currentSessionKey) return;
 
@@ -1908,6 +1970,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (isDuplicateChatEvent(eventState, event)) return;
 
     _lastChatEventAt = Date.now();
+
+    // Normalize OpenAI-compatible reasoning_content to Anthropic-style thinking blocks.
+    // DeepSeek and other OpenAI-compatible models emit reasoning/re-thinking content
+    // in the `reasoning_content` field rather than `type: 'thinking'` content blocks.
+    // This conversion ensures:
+    //   1. The safety timeout doesn't fire during the thinking phase (streamingMessage stays
+    //      populated, so checkStuck returns early).
+    //   2. Thinking content is visible via the existing ThinkingBlock UI component.
+    //   3. Tool-only detection (isToolOnlyMessage) correctly identifies thinking+tool_use turns.
+    if (event.message && typeof event.message === 'object') {
+      event.message = normalizeReasoningContent(event.message as Record<string, unknown>);
+    }
 
     // Defensive: if state is missing but we have a message, try to infer state.
     let resolvedState = eventState;
@@ -2097,27 +2171,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }) as RawMessage;
             const clearPendingImages = { pendingToolImages: [] as AttachedFileMeta[] };
 
-            // Check if message already exists (prevent duplicates).
-            // Also check _runId: loadHistory may have already loaded the server's version
-            // of this message with a different id, so matching by msgId alone isn't enough.
-            // Gateway may deliver the same message through both the 'chat' protocol event
-            // (with runId/sessionKey) and the 'chat.message_received' notification (without
-            // runId). Fall back to the store's activeRunId so the _runId dedup works when the
-            // duplicate event arrives without a runId of its own.
-            const storeActiveRunId = get().activeRunId;
-            // 4th check: compare by role + content text.  When loadHistory has
-            // already loaded the server's version of this message (with a
-            // different id and no _runId), neither of the above checks match.
-            const _text = getMessageText(msgWithImages.content).slice(0, 200);
-            const hasMatchingContent = !!(msgWithImages.role && _text) && s.messages.some(m =>
-              m.role === msgWithImages.role &&
-              getMessageText(m.content).slice(0, 200) === _text
-            );
+            // Prevent duplicates using content-identity key (role + text + tool signatures).
+            // This catches the same message arriving via different transport paths
+            // (notification vs chat-message) without blocking legitimate multi-turn
+            // messages in the same run (unlike the old _runId-based dedup).
+            const _contentKey = computeContentKey(msgWithImages);
+            const contentExists = _contentKey && s.messages.some(m => computeContentKey(m) === _contentKey);
             const alreadyExists = s.messages.some(m => m.id === msgId)
-              || (runId && s.messages.some(m => (m as any)._runId === runId))
-              || (storeActiveRunId && s.messages.some(m => (m as any)._runId === storeActiveRunId))
-              || hasMatchingContent;
+              || contentExists;
             if (alreadyExists) {
+              const dedupReason = s.messages.some(m => m.id === msgId) ? 'msgId' : 'contentKey';
+              console.log(`[dedup] final skipped — msgId=${msgId}, runId=${runId || 'none'}, matched=${dedupReason}`);
               return toolOnly ? {
                 streamingText: '',
                 streamingMessage: null,
@@ -2154,9 +2218,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           });
           // After the final response, quietly reload history to surface all intermediate
           // tool-use turns (thinking + tool blocks) from the Gateway's authoritative record.
+          // Only reload when the message has tool-use blocks — plain-text final messages
+          // have nothing extra to surface, and the reload+merge can risk producing duplicates
+          // if the contentKey timestamp check fails to match the in-memory copy against the
+          // just-persisted server record.
           if (hasOutput && !toolOnly) {
             clearHistoryPoll();
-            void get().loadHistory(true);
+            const finalContent = finalMsg.content;
+            const hasToolBlocks = Array.isArray(finalContent)
+              && finalContent.some((b: any) => b.type === 'tool_use' || b.type === 'toolCall');
+            if (hasToolBlocks) {
+              void get().loadHistory(true);
+            }
           }
         } else {
           // No message in final event - reload history to get complete data

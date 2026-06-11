@@ -105,7 +105,16 @@ function buildGatewayEventDedupeKey(event: Record<string, unknown>): { key: stri
     }
     const stopReason = msg.stopReason ?? msg.stop_reason;
     if (stopReason) {
-      return { key: `msg|${messageId}|${String(stopReason ?? '')}` };
+      // Same-path dedup using stopReason as key
+      const baseKey = `msg|${messageId}|${String(stopReason ?? '')}`;
+      // Cross-channel dedup: generate content fingerprint so this event
+      // can be detected as duplicate against a Path A event that already
+      // registered the content fingerprint (even when message.id is missing).
+      const fingerprint = computeMessageFingerprint(msg);
+      return {
+        key: baseKey,
+        crossKey: fingerprint ? `content:${fingerprint}:${state || 'final'}` : undefined,
+      };
     }
     // Fallback: content fingerprint for dedup when id and stopReason are missing.
     // Same key format as buildContentCrossKey so cross-channel dedup works.
@@ -132,24 +141,49 @@ function shouldProcessGatewayEvent(event: Record<string, unknown>): boolean {
   // Primary dedup: check the main key
   if (gatewayEventDedupe.has(key)) return false;
 
+  const runId = event.runId != null ? String(event.runId) : '';
+  const state = event.state != null ? String(event.state) : '';
+
   // Cross-channel dedup: if the other path already processed this event
   // (identified by message.id), treat as duplicate even though keys differ.
-  if (crossKey && gatewayEventDedupe.has(crossKey)) return false;
+  if (crossKey && gatewayEventDedupe.has(crossKey)) {
+    console.log(`[dedup] shouldProcessGatewayEvent crossKey hit — state=${state} key=${key} crossKey=${crossKey}`);
+    return false;
+  }
 
   // Cross-channel dedup by runId+state: when message.id is missing, the two
   // channels build different primary keys (notification has sessionKey+seq,
   // chat-message lacks those).  runId+state is common to both paths so it
   // serves as a reliable cross-channel dedup key for the same logical event.
-  const runId = event.runId != null ? String(event.runId) : '';
-  const state = event.state != null ? String(event.state) : '';
   const runKey = runId && state ? `run:${runId}:${state}` : null;
-  if (runKey && gatewayEventDedupe.has(runKey)) return false;
+  if (runKey && gatewayEventDedupe.has(runKey)) {
+    console.log(`[dedup] shouldProcessGatewayEvent runKey hit — state=${state} key=${key} runKey=${runKey}`);
+    return false;
+  }
 
   gatewayEventDedupe.set(key, now);
 
   // Also register the cross-channel key so the other path can detect this event
   if (crossKey && !gatewayEventDedupe.has(crossKey)) {
     gatewayEventDedupe.set(crossKey, now + 1);
+  }
+
+  // Register content fingerprint as a cross-channel dedup bridge.
+  // When Path A has a message.id and registers cross:msg-id:..., the other
+  // channel's event might lack message.id (but has the same content).  The
+  // content key serves as a stable fallback so the content-match check in
+  // handleChatEvent's alreadyExists has a counterpart here.
+  if (state === 'final') {
+    const msg = event.message && typeof event.message === 'object'
+      ? (event.message as Record<string, unknown>)
+      : null;
+    const contentFingerprint = msg ? computeMessageFingerprint(msg) : null;
+    if (contentFingerprint) {
+      const contentKey = `content:${contentFingerprint}:${state}`;
+      if (!gatewayEventDedupe.has(contentKey)) {
+        gatewayEventDedupe.set(contentKey, now + 3);
+      }
+    }
   }
 
   // Register the runId-based key so the other channel can detect this event

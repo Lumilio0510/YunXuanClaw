@@ -814,6 +814,56 @@ function hasNonToolAssistantContent(message: RawMessage | undefined): boolean {
   return false;
 }
 
+/**
+ * Convert OpenAI-compatible `reasoning_content` to Anthropic-style `thinking` blocks.
+ *
+ * DeepSeek and other OpenAI-compatible models send reasoning/re-thinking content
+ * in the `reasoning_content` field of streaming delta messages, but the frontend
+ * expects `type: 'thinking'` content blocks (Anthropic format).
+ *
+ * This normalization:
+ *  1. Prevents the safety timeout from firing during the thinking phase
+ *     (streamingMessage stays populated so checkStuck returns early).
+ *  2. Makes thinking content visible in the UI via the existing ThinkingBlock component.
+ *  3. Preserves any existing text content alongside the thinking block.
+ */
+function normalizeReasoningContent<T extends Record<string, unknown> | null | undefined>(message: T): T {
+  if (!message || typeof message !== 'object') return message;
+
+  const reasoningContent = (message as Record<string, unknown>).reasoning_content;
+  if (!reasoningContent || typeof reasoningContent !== 'string' || !reasoningContent.trim()) {
+    return message;
+  }
+
+  const trimmedReasoning = reasoningContent.trim();
+  let newContent: unknown[];
+
+  const existingContent = (message as Record<string, unknown>).content;
+
+  if (existingContent === undefined || existingContent === null || existingContent === '') {
+    // Only reasoning content, no text yet
+    newContent = [{ type: 'thinking', thinking: trimmedReasoning }];
+  } else if (typeof existingContent === 'string') {
+    // String content — convert to array with thinking + text blocks
+    newContent = [{ type: 'thinking', thinking: trimmedReasoning }];
+    const trimmedText = existingContent.trim();
+    if (trimmedText) {
+      newContent.push({ type: 'text', text: trimmedText });
+    }
+  } else if (Array.isArray(existingContent)) {
+    // Already an array — prepend thinking block
+    newContent = [{ type: 'thinking', thinking: trimmedReasoning }, ...existingContent];
+  } else {
+    // Unknown format, leave as-is
+    return message;
+  }
+
+  const result = { ...message } as Record<string, unknown>;
+  result.content = newContent;
+  delete result.reasoning_content;
+  return result as T;
+}
+
 function setHistoryPollTimer(timer: ReturnType<typeof setTimeout> | null): void {
   _historyPollTimer = timer;
 }
@@ -860,4 +910,5 @@ export {
   setErrorRecoveryTimer,
   setLastChatEventAt,
   getLastChatEventAt,
+  normalizeReasoningContent,
 };

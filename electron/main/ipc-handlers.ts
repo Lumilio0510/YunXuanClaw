@@ -107,6 +107,9 @@ export function registerIpcHandlers(
   // Session handlers
   registerSessionHandlers();
 
+  // Chat history handler (direct JSONL read, no Gateway dependency)
+  registerChatHistoryHandler();
+
   // App handlers
   registerAppHandlers();
 
@@ -2607,6 +2610,111 @@ function resolveSessionJsonlPath(
       : join(sessionsDir, v.endsWith('.jsonl') ? v : `${v}.jsonl`);
   }
   return undefined;
+}
+
+/**
+ * Chat history IPC — reads JSONL files directly from disk.
+ * Much faster than going through Gateway RPC since it avoids the
+ * WebSocket connection wait and the Gateway process round-trip.
+ */
+function registerChatHistoryHandler(): void {
+  ipcMain.handle('chat:history', async (_, sessionKey: string, limit = 200) => {
+    try {
+      if (!sessionKey || !sessionKey.startsWith('agent:')) {
+        return { success: false, error: `Invalid sessionKey: ${sessionKey}` };
+      }
+
+      const parts = sessionKey.split(':');
+      if (parts.length < 3) {
+        return { success: false, error: `sessionKey has too few parts: ${sessionKey}` };
+      }
+
+      const agentId = parts[1];
+      const sessionSuffix = parts.slice(2).join(':');
+      const configDir = getOpenClawConfigDir();
+      const sessionsDir = join(configDir, 'agents', agentId, 'sessions');
+      const sessionsJsonPath = join(sessionsDir, 'sessions.json');
+      const fsP = await import('fs/promises');
+
+      // 1. Find the JSONL file for this session
+      let jsonlPath: string | undefined;
+
+      try {
+        const raw = await fsP.readFile(sessionsJsonPath, 'utf8');
+        const sessionsJson = JSON.parse(raw) as Record<string, unknown>;
+
+        // Array format: { sessions: [{ key, file, ... }] }
+        if (Array.isArray(sessionsJson.sessions)) {
+          const entry = (sessionsJson.sessions as Array<Record<string, unknown>>)
+            .find((s) => s.key === sessionKey || s.sessionKey === sessionKey);
+          if (entry) {
+            jsonlPath = resolveSessionJsonlPath(entry, entry, sessionsDir);
+          }
+        }
+
+        // Object format: { "agent:main:xxx": { file, ... } }
+        if (!jsonlPath) {
+          const rawValue = sessionsJson[sessionKey];
+          if (rawValue && typeof rawValue === 'object') {
+            jsonlPath = resolveSessionJsonlPath(rawValue as Record<string, unknown>, rawValue, sessionsDir);
+          } else if (typeof rawValue === 'string') {
+            jsonlPath = resolveSessionJsonlPath(null, rawValue, sessionsDir);
+          }
+        }
+
+        // Fallback: try sessionSuffix as direct filename
+        if (!jsonlPath) {
+          const candidatePath = join(sessionsDir, `${sessionSuffix}.jsonl`);
+          try {
+            await fsP.access(candidatePath);
+            jsonlPath = candidatePath;
+          } catch { /* not found */ }
+        }
+      } catch (e) {
+        logger.debug(`[chat:history] Could not read sessions.json: ${String(e)}`);
+      }
+
+      if (!jsonlPath) {
+        return { success: false, error: 'Session JSONL file not found' };
+      }
+
+      // 2. Read and parse JSONL file
+      const allMessages: Record<string, unknown>[] = [];
+      try {
+        const content = await fsP.readFile(jsonlPath, 'utf8');
+        const lines = content.split('\n');
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const parsed = JSON.parse(trimmed);
+            // OpenClaw JSONL wraps messages in { type: "message", message: { role, content, ... } }
+            const msg = (parsed && parsed.type === 'message' && parsed.message && typeof parsed.message === 'object')
+              ? parsed.message as Record<string, unknown>
+              : parsed;
+            if (msg && typeof msg === 'object') {
+              allMessages.push(msg);
+            }
+          } catch {
+            // skip malformed lines
+          }
+        }
+      } catch (e) {
+        return { success: false, error: `Failed to read JSONL file: ${String(e)}` };
+      }
+
+      // 3. Return only the last N messages (newest-first in file = chronological order)
+      const messages = limit > 0 && allMessages.length > limit
+        ? allMessages.slice(allMessages.length - limit)
+        : allMessages;
+
+      return { success: true, result: { messages } };
+    } catch (err) {
+      logger.error('[chat:history] Unexpected error:', err);
+      return { success: false, error: String(err) };
+    }
+  });
 }
 
 function registerSessionHandlers(): void {

@@ -180,6 +180,16 @@ export async function launchGatewayProcess(options: {
       }
     });
 
+    // Drain stdout to prevent pipe buffer from filling up and blocking
+    // the child process. On Windows the pipe buffer is ~4KB — once full,
+    // the child's write() blocks indefinitely, causing startup to hang.
+    child.stdout?.on('data', (data) => {
+      const trimmed = data.toString().trimEnd();
+      if (trimmed) {
+        logger.debug('[gateway:stdout]', trimmed);
+      }
+    });
+
     child.on('spawn', () => {
       logger.info(`Gateway process started (pid=${child.pid})`);
       options.onSpawn(child.pid);
